@@ -25,24 +25,6 @@ Only the supplied `AllowedSourceCidr` can reach ports 514 and 4317. The NSG does
 
 The pipeline resource API and extensions are previews. Confirm that the selected region and subscription support them before using this package outside a disposable demo environment.
 
-## Create the repository
-
-This directory is self-contained. It does not reference files elsewhere in ArcBox and can be used as the root of its own Git repository.
-
-```powershell
-git init
-git add .
-git status
-```
-
-Add a remote after creating an empty repository in your Git host:
-
-```powershell
-git remote add origin '<repository-url>'
-```
-
-No license is included; choose one before publishing the repository if it will be shared outside your organization.
-
 ## Deploy
 
 Copy [deploy.example.ps1](deploy.example.ps1) to the ignored `deploy.local.ps1`, replace its example subscription, fresh resource group name, and source CIDR values, then run it:

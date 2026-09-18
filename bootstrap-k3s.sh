@@ -38,6 +38,17 @@ if ! command -v k3s >/dev/null 2>&1; then
 fi
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+for attempt in {1..60}; do
+  if [[ -n "$(kubectl get nodes --output=name 2>/dev/null || true)" ]]; then
+    break
+  fi
+  if [[ "$attempt" -eq 60 ]]; then
+    echo "K3s did not register a node within 300 seconds." >&2
+    exit 1
+  fi
+  sleep 5
+done
+
 kubectl wait --for=condition=Ready node --all --timeout=300s
 
 if ! command -v helm >/dev/null 2>&1; then
@@ -86,6 +97,7 @@ done
 az account set --subscription "$subscription_id"
 
 arc_connected=false
+arc_features_requested=false
 for attempt in {1..12}; do
   arc_status="$(az connectedk8s show \
     --subscription "$subscription_id" \
@@ -112,9 +124,11 @@ for attempt in {1..12}; do
     --kube-config "$KUBECONFIG" \
     --distribution k3s \
     --infrastructure azure \
+    --custom-locations-oid "$custom_locations_oid" \
     --yes \
     --only-show-errors \
     --output none; then
+    arc_features_requested=true
     for status_attempt in {1..30}; do
       arc_status="$(az connectedk8s show \
         --subscription "$subscription_id" \
@@ -139,15 +153,36 @@ if [[ "$arc_connected" != true ]]; then
   exit 1
 fi
 
-az connectedk8s enable-features \
-  --subscription "$subscription_id" \
-  --resource-group "$resource_group" \
-  --name "$cluster_name" \
-  --kube-config "$KUBECONFIG" \
-  --custom-locations-oid "$custom_locations_oid" \
-  --features cluster-connect custom-locations \
-  --only-show-errors \
-  --output none
+if [[ "$arc_features_requested" != true ]]; then
+  for attempt in {1..3}; do
+    if az connectedk8s enable-features \
+      --subscription "$subscription_id" \
+      --resource-group "$resource_group" \
+      --name "$cluster_name" \
+      --kube-config "$KUBECONFIG" \
+      --custom-locations-oid "$custom_locations_oid" \
+      --features cluster-connect custom-locations \
+      --only-show-errors \
+      --output none; then
+      arc_features_requested=true
+      break
+    fi
+
+    if [[ "$attempt" -lt 3 ]]; then
+      echo "Azure Arc feature enablement attempt ${attempt} failed; retrying in 30 seconds." >&2
+      sleep 30
+    fi
+  done
+fi
+
+if [[ "$arc_features_requested" != true ]] || \
+  ! kubectl wait --for=condition=Available deployment --all \
+    --namespace azure-arc \
+    --timeout=300s; then
+  echo "Azure Arc cluster-connect and custom-locations features did not become ready." >&2
+  kubectl get pods --namespace azure-arc --output=wide >&2 || true
+  exit 1
+fi
 
 actual_version="$(kubectl get node -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}')"
 if [[ "$actual_version" != "$k3s_version" ]]; then

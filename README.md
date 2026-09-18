@@ -35,6 +35,7 @@ code .\deploy.local.ps1
 ```
 
 Then deploy:
+
 ```powershell
 .\deploy.local.ps1
 ```
@@ -52,13 +53,17 @@ Alternatively, invoke the deployer directly from the repository root:
     -SshPublicKeyPath "$HOME\.ssh\id_ed25519.pub"
 ```
 
-Find out your Cidr with 
+Find out your Cidr with
 
 ```powershell
 (Invoke-RestMethod 'https://api.ipify.org') + '/32'
 ```
 
 Deployment commonly takes 20-40 minutes. The script is rerunnable and removes the temporary `Kubernetes Cluster - Azure Arc Onboarding` role assignment in a `finally` block, including failed bootstrap paths.
+
+If VM Run Command reports `error: no matching resources found` during K3s bootstrap, the Kubernetes API became available before K3s registered its Node object. `bootstrap-k3s.sh` handles this startup race by waiting for a Node object to exist before waiting for its `Ready` condition. Do not replace the two-phase check with only `kubectl wait --for=condition=Ready node --all`: `kubectl wait --all` does not wait for matching resources to be created.
+
+Arc feature enablement can also return `UPGRADE FAILED: context deadline exceeded` when a base Arc connection is immediately followed by an agent upgrade; in the observed failure, the `kube-aad-proxy` certificate was never issued. The bootstrap requests Custom Locations during initial Arc onboarding, retries feature enablement only for a pre-existing connection, and requires every Arc deployment to become available before continuing.
 
 The deployment performs these stages in order:
 

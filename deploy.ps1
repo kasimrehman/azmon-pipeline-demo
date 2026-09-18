@@ -135,6 +135,14 @@ function ConvertTo-ShellLiteral {
     return "'$Value'"
 }
 
+function ConvertTo-SanitizedGuestOutput {
+    param([Parameter(Mandatory)][string] $Value)
+
+    $sanitized = $Value -replace '(?im)\b(authorization|password|passwd|token|secret|credential|client[_ -]?secret|access[_ -]?key|connection[_ -]?string)\b\s*[:=]\s*\S+', '$1=[REDACTED]'
+    $sanitized = $sanitized -replace '(?i)([?&](?:sig|se|sp|sv|ske|sks|skv)=)[^&\s]+', '$1[REDACTED]'
+    return ($sanitized -replace '(?m)^__ARC_MONITOR_EXIT_CODE=\d+\r?$', '').Trim()
+}
+
 function Invoke-VmShellScript {
     param(
         [Parameter(Mandatory)][string] $VmName,
@@ -164,7 +172,11 @@ function Invoke-VmShellScript {
         throw "Azure VM Run Command did not return the guest exit code for '$([IO.Path]::GetFileName($ScriptPath))'."
     }
     if ([int] $Matches[1] -ne 0) {
-        throw "Guest script '$([IO.Path]::GetFileName($ScriptPath))' failed with exit code $($Matches[1])."
+        $guestOutput = ConvertTo-SanitizedGuestOutput -Value $result.Output
+        if ([string]::IsNullOrWhiteSpace($guestOutput)) {
+            $guestOutput = '[No guest output was returned.]'
+        }
+        throw "Guest script '$([IO.Path]::GetFileName($ScriptPath))' failed with exit code $($Matches[1]).`nGuest output:`n$guestOutput"
     }
 }
 

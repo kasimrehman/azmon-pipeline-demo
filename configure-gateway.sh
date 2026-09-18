@@ -11,6 +11,7 @@ pipeline_name="$2"
 traefik_chart_version="$3"
 gateway_selector="${pipeline_name}-gateway"
 helm_release="traefik-${pipeline_name}"
+pipeline_service="${pipeline_name}-service"
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
@@ -100,6 +101,30 @@ EOF
 kubectl wait --for=condition=Ready certificate/gateway-client-cert \
   -n "$pipeline_namespace" --timeout=300s
 
+for attempt in {1..90}; do
+  service_ports="$(kubectl get service "$pipeline_service" \
+    -n "$pipeline_namespace" \
+    -o jsonpath='{range .spec.ports[*]}{.port}{" "}{end}' \
+    2>/dev/null || true)"
+  ready_addresses="$(kubectl get endpoints "$pipeline_service" \
+    -n "$pipeline_namespace" \
+    -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{" "}{end}' \
+    2>/dev/null || true)"
+  if [[ " $service_ports " == *" 514 "* ]] && \
+    [[ " $service_ports " == *" 4317 "* ]] && \
+    [[ -n "$ready_addresses" ]]; then
+    break
+  fi
+  if [[ "$attempt" -eq 90 ]]; then
+    echo "The Azure Monitor pipeline service did not expose ready Syslog and OTLP endpoints." >&2
+    kubectl get service "$pipeline_service" -n "$pipeline_namespace" -o wide >&2 || true
+    kubectl get endpoints "$pipeline_service" -n "$pipeline_namespace" -o wide >&2 || true
+    kubectl get pods -n "$pipeline_namespace" -o wide >&2 || true
+    exit 1
+  fi
+  sleep 10
+done
+
 helm repo add traefik https://traefik.github.io/charts 2>/dev/null || true
 helm repo update traefik
 helm show crds traefik/traefik --version "$traefik_chart_version" | kubectl apply -f -
@@ -114,7 +139,7 @@ metadata:
     traefik-instance: ${gateway_selector}
 spec:
   tls:
-    serverName: "${pipeline_name}-service.${pipeline_namespace}.svc.cluster.local"
+    serverName: "${pipeline_service}.${pipeline_namespace}.svc.cluster.local"
     rootCAs:
       - configMap: arc-amp-trust-bundle
     certificatesSecrets:
@@ -134,7 +159,7 @@ spec:
   routes:
     - match: HostSNI(\`*\`)
       services:
-        - name: ${pipeline_name}-service
+        - name: ${pipeline_service}
           port: 514
           tls: true
           serversTransport: ${pipeline_name}-mtls-transport
@@ -152,7 +177,7 @@ spec:
   routes:
     - match: HostSNI(\`*\`)
       services:
-        - name: ${pipeline_name}-service
+        - name: ${pipeline_service}
           port: 4317
           tls: true
           serversTransport: ${pipeline_name}-mtls-transport

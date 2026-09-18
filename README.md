@@ -124,7 +124,7 @@ Each command prints a unique marker. Allow several minutes for ingestion, then q
 
 ```kusto
 Syslog
-| where TimeGenerated > ago(30m)
+| where TimeGenerated < ago(30m)
 | where SyslogMessage startswith "ARC-MONITOR-DEMO-SYSLOG-"
 | project TimeGenerated, Computer, Facility, SeverityLevel, ProcessName, SyslogMessage
 | order by TimeGenerated desc
@@ -132,7 +132,7 @@ Syslog
 
 ```kusto
 OTelLogs_CL
-| where TimeGenerated > ago(30m)
+| where TimeGenerated < ago(30m)
 | where tostring(pack_all()) contains "ARC-MONITOR-DEMO-OTLP-"
 | order by TimeGenerated desc
 ```

@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+report_exit_code() {
+  status=$?
+  trap - EXIT
+  echo "__ARC_MONITOR_EXIT_CODE=${status}"
+  exit 0
+}
+trap report_exit_code EXIT
+
 if [[ $# -ne 3 ]]; then
   echo "Usage: $0 <pipeline-namespace> <pipeline-name> <traefik-chart-version>" >&2
   exit 2
@@ -17,60 +25,14 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
 kubectl wait --for=jsonpath='{.status.phase}'=Active \
   "namespace/${pipeline_namespace}" --timeout=300s
-kubectl label namespace "$pipeline_namespace" \
-  arc-amp-client=true \
-  arc-amp-trust-bundle=true \
-  --overwrite
 
-for attempt in {1..60}; do
-  if kubectl get secret arc-amp-root-ca -n cert-manager >/dev/null 2>&1 && \
-    kubectl get secret arc-amp-client-root-ca -n cert-manager >/dev/null 2>&1; then
-    break
-  fi
-  if [[ "$attempt" -eq 60 ]]; then
-    echo "The Azure Monitor root certificates were not created." >&2
-    exit 1
-  fi
-  sleep 10
-done
-
-for base in arc-amp-root-ca arc-amp-client-root-ca; do
-  current="${base}-current"
-  if ! kubectl get secret "$current" -n cert-manager >/dev/null 2>&1; then
-    kubectl get secret "$base" -n cert-manager -o json | jq \
-      --arg base "$base" \
-      --arg current "$current" \
-      '{
-        apiVersion: "v1",
-        kind: "Secret",
-        metadata: {
-          name: $current,
-          namespace: "cert-manager",
-          labels: {
-            "microsoft-certmanagement.clusterextensions.azure.com/ac-rotation-active": $base
-          }
-        },
-        type: .type,
-        data: .data
-      }' | kubectl apply -f - >/dev/null
-  fi
-  kubectl label secret "$current" -n cert-manager \
-    "microsoft-certmanagement.clusterextensions.azure.com/ac-rotation-active=${base}" \
-    --overwrite >/dev/null
-done
-
-kubectl wait --for=condition=Ready \
-  clusterissuer/arc-amp-root-ca-cluster-issuer \
-  clusterissuer/arc-amp-client-root-ca-cluster-issuer \
-  --timeout=300s
-
-for attempt in {1..60}; do
+for attempt in {1..30}; do
   if kubectl get configmap arc-amp-trust-bundle -n "$pipeline_namespace" >/dev/null 2>&1 && \
     kubectl get configmap arc-amp-client-trust-bundle -n "$pipeline_namespace" >/dev/null 2>&1; then
     break
   fi
-  if [[ "$attempt" -eq 60 ]]; then
-    echo "The Azure Monitor trust bundles were not synchronized." >&2
+  if [[ "$attempt" -eq 30 ]]; then
+    echo "Pipeline certificate trust is not ready. Complete phase 1 before configuring the gateway." >&2
     exit 1
   fi
   sleep 10
@@ -128,6 +90,10 @@ done
 helm repo add traefik https://traefik.github.io/charts 2>/dev/null || true
 helm repo update traefik
 helm show crds traefik/traefik --version "$traefik_chart_version" | kubectl apply -f -
+kubectl wait --for=condition=Established \
+  crd/ingressroutetcps.traefik.io \
+  crd/serverstransporttcps.traefik.io \
+  --timeout=120s
 
 cat <<EOF | kubectl apply -f -
 apiVersion: traefik.io/v1alpha1

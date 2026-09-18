@@ -34,13 +34,13 @@ Copy-Item .\deploy.example.ps1 .\deploy.local.ps1
 code .\deploy.local.ps1
 ```
 
-Then deploy:
+Then run phase 1:
 
 ```powershell
 .\deploy.local.ps1
 ```
 
-Alternatively, invoke the deployer directly from the repository root:
+Alternatively, invoke phase 1 directly from this directory:
 
 ```powershell
 
@@ -53,13 +53,24 @@ Alternatively, invoke the deployer directly from the repository root:
     -SshPublicKeyPath "$HOME\.ssh\id_ed25519.pub"
 ```
 
-Find out your Cidr with
+The Cidr is needed for you to be able to send monitoring data to the public endpoint. Find out your Cidr with
 
 ```powershell
 (Invoke-RestMethod 'https://api.ipify.org') + '/32'
 ```
 
-Deployment commonly takes 20-40 minutes. The script is rerunnable and removes the temporary `Kubernetes Cluster - Azure Arc Onboarding` role assignment in a `finally` block, including failed bootstrap paths.
+Phase 1 commonly takes 20-40 minutes. It removes the temporary `Kubernetes Cluster - Azure Arc Onboarding` role assignment in a `finally` block, including failed bootstrap paths. At the end, it starts the `<prefix>-monitoring` resource-group deployment and returns without waiting for the preview pipeline resource.
+
+In Azure Portal, open the resource group, select **Deployments**, and wait for `<prefix>-monitoring` to show **Succeeded**. Then run phase 2:
+
+```powershell
+& .\complete-deployment.ps1 `
+    -SubscriptionId '<subscription-id>' `
+    -ResourceGroupName 'rg-arc-monitor-demo-test' `
+    -NamePrefix 'arcmon'
+```
+
+Phase 2 does not poll Azure. It verifies that the monitoring deployment already succeeded, configures the mTLS Traefik gateway, and prints the Syslog and OTLP endpoints. It is safe to run again if gateway configuration needs to be retried.
 
 If VM Run Command reports `error: no matching resources found` during K3s bootstrap, the Kubernetes API became available before K3s registered its Node object. `bootstrap-k3s.sh` handles this startup race by waiting for a Node object to exist before waiting for its `Ready` condition. Do not replace the two-phase check with only `kubectl wait --for=condition=Ready node --all`: `kubectl wait --all` does not wait for matching resources to be created.
 
@@ -71,12 +82,14 @@ The deployment performs these stages in order:
 2. Install K3s, connect it to Arc, and enable Custom Locations.
 3. Install the certificate-management and pipeline-controller extensions.
 4. Create the custom location and custom Log Analytics table.
-5. Start pipeline deployment asynchronously, reconcile its certificate trust, and configure Traefik.
-6. Wait for the Azure deployment and Kubernetes workloads to report ready.
+5. Prepare pipeline certificate trust, start the monitoring deployment asynchronously, and end phase 1.
+6. After the monitoring deployment succeeds, run phase 2 to configure Traefik and expose the endpoints.
 
-The preview certificate extension can create the Azure Monitor root CA Secrets without promoting the active `*-current` aliases expected by its ClusterIssuers. The gateway script detects this state and performs an idempotent in-cluster promotion without printing certificate or key data. Remove this compatibility step when the extension implements that rotation contract directly.
+The preview certificate extension can create the Azure Monitor root CA Secrets without promoting the active `*-current` aliases expected by its ClusterIssuers. Phase 1 detects this state and performs an idempotent in-cluster promotion without printing certificate or key data. Remove this compatibility step when the extension implements that rotation contract directly.
 
 ## Validate
+
+Run validation after phase 2:
 
 ```powershell
 & .\validate.ps1 `
@@ -89,14 +102,14 @@ The validation checks both ARM deployments, the workspace, Arc connectivity, the
 
 ## Send demo logs
 
-Use the endpoint printed by `deploy.ps1` or `validate.ps1`:
+Use the endpoint printed by `complete-deployment.ps1` or `validate.ps1`:
 
 ```powershell
 & .\send-syslog-demo.ps1 -Endpoint '<public-ip>'
 & .\send-otlp-demo.ps1 -Endpoint '<public-ip>'
 ```
 
-You can retrieve it again from Azure at any time:
+You can retrieve the public IP from Azure at any time:
 
 ```powershell
 az network public-ip show `

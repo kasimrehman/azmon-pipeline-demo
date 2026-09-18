@@ -47,11 +47,10 @@ $scriptRoot = $PSScriptRoot
 $infraTemplate = Join-Path $scriptRoot 'infra.bicep'
 $monitoringTemplate = Join-Path $scriptRoot 'monitoring.bicep'
 $bootstrapScript = Join-Path $scriptRoot 'bootstrap-k3s.sh'
-$gatewayScript = Join-Path $scriptRoot 'configure-gateway.sh'
+$pipelinePreparationScript = Join-Path $scriptRoot 'prepare-pipeline.sh'
 $pipelineNamespace = 'azure-monitor-pipeline'
 $certificateExtensionName = 'azure-cert-management'
 $pipelineExtensionName = 'azure-monitor-pipeline'
-$traefikChartVersion = '41.6.0'
 $workloadTagValue = 'azure-monitor-pipeline-demo'
 $onboardingRoleDefinitionId = '34e09817-6cbe-4d01-b1a2-e0eac5743d41'
 $customLocationsServiceAppId = 'bc313c14-388c-4e7d-a58e-70017303ee3b'
@@ -67,6 +66,12 @@ $requiredProviders = @(
     'Microsoft.OperationalInsights'
 )
 
+function Write-DeploymentStatus {
+    param([Parameter(Mandatory)][string] $Message)
+
+    Write-Host "[$([DateTime]::Now.ToString('HH:mm:ss'))] $Message"
+}
+
 function Invoke-AzCli {
     param(
         [Parameter(Mandatory)]
@@ -76,8 +81,13 @@ function Invoke-AzCli {
         [switch] $AllowFailure
     )
 
+    $commandPath = ($Arguments | Select-Object -First 3 | Where-Object { -not $_.StartsWith('--') }) -join ' '
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    Write-DeploymentStatus "Starting: az $commandPath"
     $output = @(& az @Arguments 2>&1)
     $exitCode = $LASTEXITCODE
+    $stopwatch.Stop()
+    Write-DeploymentStatus "Finished: az $commandPath (exit $exitCode, $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))s)"
     if ($exitCode -ne 0 -and -not $AllowFailure) {
         $message = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
         throw "Azure CLI command failed (exit $exitCode): az $($Arguments[0]) $($Arguments[1])`n$message"
@@ -150,23 +160,42 @@ function Invoke-VmShellScript {
         [Parameter()][string[]] $ScriptArguments = @()
     )
 
-    $scriptBytes = [Text.Encoding]::UTF8.GetBytes((Get-Content -LiteralPath $ScriptPath -Raw))
-    $encodedScript = [Convert]::ToBase64String($scriptBytes)
     $remotePath = "/tmp/arc-monitor-$([Guid]::NewGuid().ToString('N')).sh"
     $argumentText = ($ScriptArguments | ForEach-Object { ConvertTo-ShellLiteral $_ }) -join ' '
-    $command = "echo '$encodedScript' | base64 -d > '$remotePath'; chmod 700 '$remotePath'; '$remotePath' $argumentText; status=`$?; rm -f '$remotePath'; echo __ARC_MONITOR_EXIT_CODE=`$status; exit 0"
+    $delimiter = "ARC_MONITOR_SCRIPT_$([Guid]::NewGuid().ToString('N'))"
+    $wrapperPath = Join-Path ([IO.Path]::GetTempPath()) "arc-monitor-$([Guid]::NewGuid().ToString('N')).sh"
+    $scriptContent = Get-Content -LiteralPath $ScriptPath -Raw
+    $wrapperContent = @"
+#!/usr/bin/env bash
+cat > '$remotePath' <<'$delimiter'
+$scriptContent
+$delimiter
+chmod 700 '$remotePath'
+'$remotePath' $argumentText
+status=`$?
+rm -f '$remotePath'
+echo __ARC_MONITOR_EXIT_CODE=`$status
+exit 0
+"@
 
-    $result = Invoke-AzCli -Arguments @(
-        'vm', 'run-command', 'invoke',
-        '--subscription', $SubscriptionId,
-        '--resource-group', $ResourceGroupName,
-        '--name', $VmName,
-        '--command-id', 'RunShellScript',
-        '--scripts', $command,
-        '--query', 'value[0].message',
-        '--output', 'tsv',
-        '--only-show-errors'
-    )
+    try {
+        Write-DeploymentStatus "Running guest script '$([IO.Path]::GetFileName($ScriptPath))' on VM '$VmName'. This can take several minutes."
+        [IO.File]::WriteAllText($wrapperPath, $wrapperContent, [Text.UTF8Encoding]::new($false))
+        $result = Invoke-AzCli -Arguments @(
+            'vm', 'run-command', 'invoke',
+            '--subscription', $SubscriptionId,
+            '--resource-group', $ResourceGroupName,
+            '--name', $VmName,
+            '--command-id', 'RunShellScript',
+            '--scripts', "@$wrapperPath",
+            '--query', 'value[0].message',
+            '--output', 'tsv',
+            '--only-show-errors'
+        )
+    }
+    finally {
+        Remove-Item -LiteralPath $wrapperPath -Force -ErrorAction SilentlyContinue
+    }
 
     if ($result.Output -notmatch '(?m)^__ARC_MONITOR_EXIT_CODE=(\d+)\r?$') {
         throw "Azure VM Run Command did not return the guest exit code for '$([IO.Path]::GetFileName($ScriptPath))'."
@@ -178,6 +207,8 @@ function Invoke-VmShellScript {
         }
         throw "Guest script '$([IO.Path]::GetFileName($ScriptPath))' failed with exit code $($Matches[1]).`nGuest output:`n$guestOutput"
     }
+
+    Write-DeploymentStatus "Guest script '$([IO.Path]::GetFileName($ScriptPath))' completed successfully."
 }
 
 function Wait-KubernetesExtension {
@@ -200,6 +231,7 @@ function Wait-KubernetesExtension {
             '--output', 'tsv',
             '--only-show-errors'
         )).Output
+        Write-DeploymentStatus "Extension '$ExtensionName' state: $state"
 
         if ($state -eq 'Succeeded') {
             return
@@ -212,37 +244,6 @@ function Wait-KubernetesExtension {
     } while ([DateTime]::UtcNow -lt $deadline)
 
     throw "Timed out waiting for extension '$ExtensionName'. Last state: '$state'."
-}
-
-function Wait-ResourceGroupDeployment {
-    param(
-        [Parameter(Mandatory)][string] $DeploymentName,
-        [Parameter()][int] $TimeoutMinutes = 30
-    )
-
-    $deadline = [DateTime]::UtcNow.AddMinutes($TimeoutMinutes)
-    do {
-        $state = (Invoke-AzCli -Arguments @(
-            'deployment', 'group', 'show',
-            '--subscription', $SubscriptionId,
-            '--resource-group', $ResourceGroupName,
-            '--name', $DeploymentName,
-            '--query', 'properties.provisioningState',
-            '--output', 'tsv',
-            '--only-show-errors'
-        )).Output
-
-        if ($state -eq 'Succeeded') {
-            return
-        }
-        if ($state -in @('Failed', 'Canceled')) {
-            throw "Deployment '$DeploymentName' entered provisioning state '$state'."
-        }
-
-        Start-Sleep -Seconds 15
-    } while ([DateTime]::UtcNow -lt $deadline)
-
-    throw "Timed out waiting for deployment '$DeploymentName'. Last state: '$state'."
 }
 
 function Ensure-KubernetesExtension {
@@ -294,13 +295,14 @@ function Ensure-KubernetesExtension {
     Wait-KubernetesExtension -ClusterName $ClusterName -ExtensionName $ExtensionName
 }
 
-foreach ($path in @($infraTemplate, $monitoringTemplate, $bootstrapScript, $gatewayScript)) {
+foreach ($path in @($infraTemplate, $monitoringTemplate, $bootstrapScript, $pipelinePreparationScript)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required deployment file not found: $path"
     }
 }
 
 Assert-Cidr -Value $AllowedSourceCidr
+Write-DeploymentStatus "Starting phase 1 deployment for resource group '$ResourceGroupName' in '$Location'."
 
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
     throw 'Azure CLI is required and was not found on PATH.'
@@ -560,6 +562,7 @@ do {
         '--output', 'tsv',
         '--only-show-errors'
     )).Output
+    Write-DeploymentStatus "Custom location '$customLocationName' state: $customLocationState"
     if ($customLocationState -eq 'Succeeded') {
         break
     }
@@ -625,6 +628,8 @@ do {
         '--only-show-errors'
     ) -AllowFailure
     $tableState = $tableStateResult.Output
+    $displayTableState = if ([string]::IsNullOrWhiteSpace($tableState)) { 'Not available yet' } else { $tableState }
+    Write-DeploymentStatus "Log Analytics table 'OTelLogs_CL' state: $displayTableState"
     if ($tableStateResult.ExitCode -eq 0 -and $tableState -eq 'Succeeded') {
         break
     }
@@ -641,6 +646,10 @@ if ($tableState -ne 'Succeeded') {
 
 $pipelineName = "$NamePrefix-pipeline"
 $monitoringDeploymentName = "$NamePrefix-monitoring"
+Invoke-VmShellScript -VmName $vmName -ScriptPath $pipelinePreparationScript -ScriptArguments @(
+    $pipelineNamespace
+)
+
 Invoke-AzCli -Arguments @(
     'deployment', 'group', 'create',
     '--subscription', $SubscriptionId,
@@ -660,24 +669,8 @@ Invoke-AzCli -Arguments @(
     '--only-show-errors'
 ) | Out-Null
 
-Invoke-VmShellScript -VmName $vmName -ScriptPath $gatewayScript -ScriptArguments @(
-    $pipelineNamespace,
-    $pipelineName,
-    $traefikChartVersion
-)
-
-Wait-ResourceGroupDeployment -DeploymentName $monitoringDeploymentName
-
 Write-Host ''
-Write-Host 'Standalone Azure Monitor pipeline demo deployed.'
-Write-Host "Resource group: $ResourceGroupName"
-Write-Host "Arc cluster:    $clusterName"
-Write-Host "K3s version:    $K3sVersion"
-Write-Host "Workspace:      $workspaceName"
-Write-Host "Workspace ID:   $workspaceCustomerId"
-Write-Host "Syslog endpoint: ${publicIpAddress}:514"
-Write-Host "OTLP endpoint:   ${publicIpAddress}:4317"
-Write-Host ''
-Write-Host 'Run the demos from this directory:'
-Write-Host "  & .\send-syslog-demo.ps1 -Endpoint '$publicIpAddress'"
-Write-Host "  & .\send-otlp-demo.ps1 -Endpoint '$publicIpAddress'"
+Write-Host 'Phase 1 complete.'
+Write-Host "In Azure Portal, open resource group '$ResourceGroupName' and wait for deployment '$monitoringDeploymentName' to show Succeeded."
+Write-Host 'Then run:'
+Write-Host "  & .\complete-deployment.ps1 -SubscriptionId '$SubscriptionId' -ResourceGroupName '$ResourceGroupName' -NamePrefix '$NamePrefix'"

@@ -83,16 +83,25 @@ az extension add --name connectedk8s --upgrade --only-show-errors
 az extension add --name k8s-extension --upgrade --only-show-errors
 az extension add --name customlocation --upgrade --only-show-errors
 
-for attempt in {1..12}; do
-  if az login --identity --allow-no-subscriptions --output none --only-show-errors; then
+identity_subscription_ready=false
+for attempt in {1..30}; do
+  if az login --identity --allow-no-subscriptions --output none --only-show-errors && \
+    az account show \
+      --subscription "$subscription_id" \
+      --output none \
+      --only-show-errors; then
+    identity_subscription_ready=true
     break
   fi
-  if [[ "$attempt" -eq 12 ]]; then
-    echo "Managed identity login did not become available." >&2
-    exit 1
-  fi
+
+  echo "Managed identity cannot access subscription yet (attempt ${attempt}/30); retrying in 10 seconds." >&2
   sleep 10
 done
+
+if [[ "$identity_subscription_ready" != true ]]; then
+  echo "Managed identity login succeeded, but subscription ${subscription_id} did not become accessible after waiting for role propagation." >&2
+  exit 1
+fi
 
 az account set --subscription "$subscription_id"
 

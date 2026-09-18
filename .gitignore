@@ -1,0 +1,9 @@
+.azure/
+.vscode/
+deploy.local.ps1
+infra.json
+monitoring.json
+*.log
+*.tmp
+Thumbs.db
+.DS_Store

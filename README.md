@@ -27,11 +27,16 @@ The pipeline resource API and extensions are previews. Confirm that the selected
 
 ## Deploy
 
-Copy [deploy.example.ps1](deploy.example.ps1) to the ignored `deploy.local.ps1`, replace its example subscription, fresh resource group name, and source CIDR values, then run it:
+Copy [deploy.example.ps1](deploy.example.ps1) to the ignored `deploy.local.ps1`, replace its example subscription, fresh resource group name, and source CIDR values, then edit it:
 
 ```powershell
 Copy-Item .\deploy.example.ps1 .\deploy.local.ps1
-& .\deploy.local.ps1
+code .\deploy.local.ps1
+```
+
+Then deploy:
+```powershell
+.\deploy.local.ps1
 ```
 
 Alternatively, invoke the deployer directly from the repository root:
@@ -45,6 +50,12 @@ Alternatively, invoke the deployer directly from the repository root:
     -NamePrefix 'arcmon' `
     -AllowedSourceCidr '<your-public-ip>/32' `
     -SshPublicKeyPath "$HOME\.ssh\id_ed25519.pub"
+```
+
+Find out your Cidr with 
+
+```powershell
+(Invoke-RestMethod 'https://api.ipify.org') + '/32'
 ```
 
 Deployment commonly takes 20-40 minutes. The script is rerunnable and removes the temporary `Kubernetes Cluster - Azure Arc Onboarding` role assignment in a `finally` block, including failed bootstrap paths.

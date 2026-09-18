@@ -34,6 +34,11 @@ Copy-Item .\deploy.example.ps1 .\deploy.local.ps1
 code .\deploy.local.ps1
 ```
 
+Then deploy:
+```powershell
+.\deploy.local.ps1
+```
+
 Alternatively, invoke the deployer directly from the repository root:
 
 ```powershell
@@ -49,7 +54,7 @@ Alternatively, invoke the deployer directly from the repository root:
 
 Find out your Cidr with 
 
-```
+```powershell
 (Invoke-RestMethod 'https://api.ipify.org') + '/32'
 ```
 

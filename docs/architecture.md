@@ -4,11 +4,41 @@ This page describes the complete architecture of the standalone Arc-enabled Azur
 
 ## Purpose and scope
 
-The demo creates a single-node K3s cluster on an Azure virtual machine, projects that cluster into Azure through Azure Arc, and schedules an Azure Monitor pipeline onto it through a custom location. Two source-restricted public TCP endpoints accept Syslog and OTLP logs. An in-cluster Traefik gateway forwards both streams over mutually authenticated TLS (mTLS) to the managed pipeline, which sends the records through an Azure Monitor data collection endpoint and data collection rule into Log Analytics.
+The demo creates a single-node K3s cluster on an Azure virtual machine, projects that cluster into Azure through Azure Arc, and schedules an Azure Monitor pipeline onto it through a custom location. Two source-restricted public TCP endpoints accept raw Syslog TCP and OTLP gRPC traffic. An in-cluster Traefik gateway opens separate mutually authenticated TLS (mTLS) connections to the managed pipeline, which sends the records through an Azure Monitor data collection endpoint and data collection rule into Log Analytics.
 
-This is an isolated demonstration environment, not a production reference architecture. It intentionally uses one VM, public ingestion endpoints, public Azure Monitor ingestion, and preview Azure Monitor APIs and extensions.
+This is an isolated demonstration environment, not a production reference architecture. It intentionally uses one VM, public ingestion endpoints, public Azure Monitor ingestion, and the preview OTLP log receiver. The Syslog pipeline scenario is generally available.
 
-## System topology
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    clients[Syslog and OTLP clients]
+    gateway[Traefik gateway]
+    pipeline[Azure Monitor pipeline<br/>on K3s]
+    ingestion[Data collection endpoint<br/>and data collection rule]
+    logs[Log Analytics<br/>Syslog and OTelLogs_CL]
+    azure[Azure and Azure Arc<br/>control plane]
+
+    clients -->|source-restricted raw TCP| gateway
+    gateway -->|in-cluster mTLS| pipeline
+    pipeline -->|HTTPS with managed identity| ingestion
+    ingestion --> logs
+    azure -. deploys and reconciles .-> pipeline
+```
+
+This is an edge-to-cloud telemetry path with an Azure-managed control plane. Azure Resource Manager defines the pipeline, Azure Arc and the custom location place it on K3s, and the pipeline extension reconciles the requested state inside the cluster. The data plane accepts both legacy Syslog and modern OTLP logs, normalizes or maps them into DCR streams, and exports them to one dedicated Log Analytics workspace.
+
+The current configuration demonstrates:
+
+- Central deployment and lifecycle management of an edge collector through Azure Arc.
+- Syslog and preview OTLP log collection through one pipeline group.
+- Source-restricted public ingress, an mTLS-protected in-cluster backend hop, and managed-identity export to Azure Monitor.
+- Standard Syslog normalization with the `MicrosoftSyslog` processor and explicit OTLP field mapping.
+- Repeatable infrastructure deployment plus marker-based end-to-end ingestion checks.
+
+Both data paths are intentionally straight through. The DCR transformations are `source`; the Syslog path only applies the required `MicrosoftSyslog` processor; and the OTLP path retains only body, severity text, and timestamp. The demo does not currently configure edge filtering, redaction, aggregation, routing to multiple destinations, durable pipeline storage, autoscaling, or pipeline-health alerting. Those are extension opportunities, not deployed capabilities.
+
+## Detailed system topology
 
 ```mermaid
 flowchart LR
@@ -104,7 +134,7 @@ The custom location is the bridge between Azure Resource Manager and this runtim
 
 ## Deployment control flow
 
-Deployment is deliberately split into two phases because creation of the preview pipeline group can remain in progress long enough to outlive a practical local polling loop.
+Deployment is deliberately split into two phases because creation of the pipeline group can remain in progress long enough to outlive a practical local polling loop.
 
 ```mermaid
 sequenceDiagram
@@ -184,7 +214,7 @@ The Custom Locations service principal object ID is resolved in the tenant and s
 
 Transport trust is separate from Azure RBAC. The certificate extension maintains the Azure Monitor certificate hierarchy. Namespace labels request server and client trust bundles. Traefik presents a short-lived client certificate to the pipeline, validates the pipeline service certificate against `arc-amp-trust-bundle`, and checks the service's cluster DNS name.
 
-The preview certificate extension can create base root CA Secrets before it creates the active `-current` aliases expected by its ClusterIssuers. `prepare-pipeline.sh` includes an idempotent compatibility step that creates the missing aliases in-cluster without printing certificate or key material.
+The certificate-management extension can create base root CA Secrets before it creates the active `-current` aliases expected by its ClusterIssuers. `prepare-pipeline.sh` includes an idempotent compatibility step that creates the missing aliases in-cluster without printing certificate or key material.
 
 ## Telemetry data flow
 
@@ -222,7 +252,7 @@ Both routes share the data collection endpoint, DCR, workspace, pipeline extensi
 
 `validate.ps1` verifies both ARM deployments, Arc connectivity, the exact K3s version, both extensions, the custom location, DCR, pipeline group, custom table, workspace, and TCP reachability of both public endpoints. The sender scripts add unique markers so ingestion can be confirmed independently in the `Syslog` and `OTelLogs_CL` tables.
 
-Certificate renewal is handled by cert-manager according to the certificate resource. Extension and chart versions remain operational dependencies: K3s is explicitly pinned, Traefik is explicitly pinned, and the Arc extensions use automatic minor-version upgrades. Because the pipeline API and extensions are previews, version changes should be validated end to end before reuse.
+Certificate renewal is handled by cert-manager according to the certificate resource. Extension and chart versions remain operational dependencies: K3s is explicitly pinned, Traefik is explicitly pinned, and the Arc extensions use automatic minor-version upgrades. Because the OTLP path remains in preview and extension behavior can change across versions, version changes should be validated end to end before reuse.
 
 `cleanup.ps1` deletes the entire resource group, but only after confirming its standalone workload tag. Deleting the group removes the Azure resources, VM-hosted cluster, Arc projection, telemetry workspace, and role assignments together. Log Analytics data is not retained after workspace deletion.
 

@@ -1,8 +1,8 @@
 # Standalone Arc-enabled Azure Monitor pipeline demo
 
-This package deploys an isolated Ubuntu 22.04 VM running K3s `v1.33.3+k3s1`, connects it to Azure Arc, installs the Azure Monitor pipeline preview, and exposes source-restricted Syslog TCP/514 and OTLP gRPC/4317 demo endpoints.
+This package deploys an isolated Ubuntu 22.04 VM running K3s `v1.33.3+k3s1`, connects it to Azure Arc, installs an Azure Monitor pipeline, and exposes source-restricted Syslog TCP/514 and OTLP gRPC/4317 demo endpoints. The Syslog pipeline scenario is generally available; OTLP log collection remains in preview.
 
-It does not depend on the rest of ArcBox. SSH and the Kubernetes API are not exposed publicly; cluster bootstrap uses Azure VM Run Command. Traefik accepts the two external TCP protocols and uses a managed client certificate for mTLS to the in-cluster pipeline.
+It does not depend on the rest of ArcBox. SSH and the Kubernetes API are not exposed publicly; cluster bootstrap uses Azure VM Run Command. Clients send raw Syslog TCP or OTLP gRPC to Traefik. Traefik then uses a managed client certificate and mTLS for the separate in-cluster connection to the pipeline.
 
 ## What gets deployed
 
@@ -25,7 +25,7 @@ For component relationships, deployment sequencing, identity and certificate tru
 - Your sender's public IPv4 address expressed as a single-host CIDR, such as `203.0.113.10/32`.
 - Python 3 for the OTLP demo client. Its default Windows launcher is `py`; use `-PythonCommand python3` where appropriate.
 
-The pipeline resource API and extensions are previews. Confirm that the selected region and subscription support them before using this package outside a disposable demo environment.
+The Syslog pipeline scenario is generally available, while the OTLP receiver and OTLP log path used by this demo are preview features. Confirm that the selected region and subscription support the required features before using this package outside a disposable demo environment.
 
 ## Deploy
 
@@ -48,7 +48,7 @@ Alternatively, invoke phase 1 directly from this directory:
 
 & .\deploy.ps1 `
     -SubscriptionId '<subscription-id>' `
-    -ResourceGroupName 'rg-arc-monitor-demo-test' `
+    -ResourceGroupName 'rg-arc-monitor-demo' `
     -Location 'eastus2' `
     -NamePrefix 'arcmon' `
     -AllowedSourceCidr '<your-public-ip>/32' `
@@ -61,14 +61,14 @@ The Cidr is needed for you to be able to send monitoring data to the public endp
 (Invoke-RestMethod 'https://api.ipify.org') + '/32'
 ```
 
-Phase 1 commonly takes 20-40 minutes. It removes the temporary `Kubernetes Cluster - Azure Arc Onboarding` role assignment in a `finally` block, including failed bootstrap paths. At the end, it starts the `<prefix>-monitoring` resource-group deployment and returns without waiting for the preview pipeline resource.
+Phase 1 commonly takes 20-40 minutes. It removes the temporary `Kubernetes Cluster - Azure Arc Onboarding` role assignment in a `finally` block, including failed bootstrap paths. At the end, it starts the `<prefix>-monitoring` resource-group deployment and returns without waiting for the long-running pipeline resource deployment.
 
 In Azure Portal, open the resource group, select **Deployments**, and wait for `<prefix>-monitoring` to show **Succeeded**. Then run phase 2:
 
 ```powershell
 & .\complete-deployment.ps1 `
     -SubscriptionId '<subscription-id>' `
-    -ResourceGroupName 'rg-arc-monitor-demo-test' `
+    -ResourceGroupName 'rg-arc-monitor-demo' `
     -NamePrefix 'arcmon'
 ```
 
@@ -87,7 +87,7 @@ The deployment performs these stages in order:
 5. Prepare pipeline certificate trust, start the monitoring deployment asynchronously, and end phase 1.
 6. After the monitoring deployment succeeds, run phase 2 to configure Traefik and expose the endpoints.
 
-The preview certificate extension can create the Azure Monitor root CA Secrets without promoting the active `*-current` aliases expected by its ClusterIssuers. Phase 1 detects this state and performs an idempotent in-cluster promotion without printing certificate or key data. Remove this compatibility step when the extension implements that rotation contract directly.
+The certificate-management extension can create the Azure Monitor root CA Secrets without promoting the active `*-current` aliases expected by its ClusterIssuers. Phase 1 detects this state and performs an idempotent in-cluster promotion without printing certificate or key data. Remove this compatibility step when the extension implements that rotation contract directly.
 
 ## Validate
 
@@ -116,7 +116,7 @@ You can retrieve the public IP from Azure at any time:
 ```powershell
 az network public-ip show `
     --subscription '<subscription-id>' `
-    --resource-group 'rg-arc-monitor-demo-test' `
+    --resource-group 'rg-arc-monitor-demo' `
     --name 'arcmon-pip' `
     --query ipAddress `
     --output tsv
@@ -126,7 +126,7 @@ Each command prints a unique marker. Allow several minutes for ingestion, then q
 
 ```kusto
 Syslog
-| where TimeGenerated < ago(30m)
+| where TimeGenerated > ago(30m)
 | where SyslogMessage startswith "ARC-MONITOR-DEMO-SYSLOG-"
 | project TimeGenerated, Computer, Facility, SeverityLevel, ProcessName, SyslogMessage
 | order by TimeGenerated desc
@@ -134,10 +134,12 @@ Syslog
 
 ```kusto
 OTelLogs_CL
-| where TimeGenerated < ago(30m)
+| where TimeGenerated > ago(30m)
 | where tostring(pack_all()) contains "ARC-MONITOR-DEMO-OTLP-"
 | order by TimeGenerated desc
 ```
+
+`ago(30m)` evaluates to the timestamp at the start of the 30-minute window. `TimeGenerated > ago(30m)` therefore keeps newer records from that window; `<` would select records older than 30 minutes.
 
 Use the complete marker printed by each sender for final proof. A successful TCP connection or OTLP export confirms transport, but the deployment is end-to-end validated only when both exact markers are returned from the standalone workspace.
 
@@ -145,7 +147,7 @@ Use the complete marker printed by each sender for final proof. A successful TCP
 
 Verified on September 18, 2026 in East US 2 with K3s `v1.33.3+k3s1`, Azure Monitor pipeline operator `1.7.0`, pipeline `0.99.0`, and Traefik chart `41.6.0`. The deployment, all validation checks, Syslog ingestion, and OTLP ingestion completed successfully.
 
-This is a preview demo, not a production reference architecture. Pin and retest preview API, extension, image, and chart versions before reuse.
+This is a demonstration, not a production reference architecture. The OTLP path remains in preview. Pin and retest the resource API, extension, image, and chart versions before reuse.
 
 ## Clean up
 

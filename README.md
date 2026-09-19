@@ -14,6 +14,8 @@ It does not depend on the rest of ArcBox. SSH and the Kubernetes API are not exp
 
 Only the supplied `AllowedSourceCidr` can reach ports 514 and 4317. The NSG does not expose SSH or the Kubernetes API. The deployment temporarily grants the VM identity the Arc onboarding role and removes that assignment after bootstrap.
 
+For component relationships, deployment sequencing, identity and certificate trust, and end-to-end telemetry flows, see the [detailed architecture](docs/architecture.md).
+
 ## Prerequisites
 
 - PowerShell 7 and Azure CLI.

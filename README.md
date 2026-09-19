@@ -14,7 +14,7 @@ It does not depend on the rest of ArcBox. SSH and the Kubernetes API are not exp
 
 Only the supplied `AllowedSourceCidr` can reach ports 514 and 4317. The NSG does not expose SSH or the Kubernetes API. The deployment temporarily grants the VM identity the Arc onboarding role and removes that assignment after bootstrap.
 
-For component relationships, deployment sequencing, identity and certificate trust, and end-to-end telemetry flows, see the [detailed architecture](docs/architecture.md).
+For component relationships, deployment sequencing, identity and certificate trust, and end-to-end telemetry flows, see the [detailed architecture](docs/architecture.md). Use [demo setup and operations](docs/demo-setup.md) to install and verify the showcase, then follow the [12-minute demo guide](docs/demo-guide.md) during the presentation.
 
 ## Prerequisites
 
@@ -101,6 +101,26 @@ Run validation after phase 2:
 ```
 
 The validation checks both ARM deployments, the workspace, Arc connectivity, the full pinned K3s version, both extensions, the custom location, DCR, pipeline group, custom table, and TCP reachability from the current machine.
+
+## Install the full showcase
+
+The base deployment is intentionally small. Add continuous traffic, filtering, redaction, aggregation, persistent buffering, and full readiness checks without changing the base scripts:
+
+```powershell
+& .\setup-demo.ps1 `
+    -SubscriptionId '<subscription-id>' `
+    -ResourceGroupName 'rg-arc-monitor-demo' `
+    -NamePrefix 'arcmon'
+
+& .\test-demo-readiness.ps1 `
+    -SubscriptionId '<subscription-id>' `
+    -ResourceGroupName 'rg-arc-monitor-demo' `
+    -NamePrefix 'arcmon'
+```
+
+The readiness check sends a short run and waits for filtered, redacted, and aggregated records. See [demo setup and operations](docs/demo-setup.md) for the persistent-storage limitation and rehearsed outage controls.
+
+Before presenting the resilience segment, run `test-demo-recovery.ps1` as documented in the operator guide. The normal readiness check does not simulate an outage.
 
 ## Send demo logs
 

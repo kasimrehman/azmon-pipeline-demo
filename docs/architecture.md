@@ -1,6 +1,6 @@
 # Architecture
 
-This page describes the complete architecture of the standalone Arc-enabled Azure Monitor pipeline demo. For deployment and validation commands, see the [project README](../README.md).
+This page describes the complete architecture of the standalone Arc-enabled Azure Monitor pipeline demo. For deployment and validation commands, see the [project README](../README.md). For showcase installation, see [demo setup and operations](demo-setup.md). For the timed walkthrough, see the [12-minute demo guide](demo-guide.md).
 
 ## Purpose and scope
 
@@ -14,13 +14,15 @@ This is an isolated demonstration environment, not a production reference archit
 flowchart LR
     clients[Syslog and OTLP clients]
     gateway[Traefik gateway]
-    pipeline[Azure Monitor pipeline<br/>on K3s]
+    pipeline[Azure Monitor pipeline<br/>filter, redact, and aggregate]
+    buffer[Persistent exporter queues<br/>demo-only hostPath PV]
     ingestion[Data collection endpoint<br/>and data collection rule]
-    logs[Log Analytics<br/>Syslog and OTelLogs_CL]
+    logs[Log Analytics<br/>Syslog, OTelLogs_CL,<br/>and EdgeLogSummary_CL]
     azure[Azure and Azure Arc<br/>control plane]
 
     clients -->|source-restricted raw TCP| gateway
     gateway -->|in-cluster mTLS| pipeline
+    pipeline <--> buffer
     pipeline -->|HTTPS with managed identity| ingestion
     ingestion --> logs
     azure -. deploys and reconciles .-> pipeline
@@ -28,7 +30,7 @@ flowchart LR
 
 This is an edge-to-cloud telemetry path with an Azure-managed control plane. Azure Resource Manager defines the pipeline, Azure Arc and the custom location place it on K3s, and the pipeline extension reconciles the requested state inside the cluster. The data plane accepts both legacy Syslog and modern OTLP logs, normalizes or maps them into DCR streams, and exports them to one dedicated Log Analytics workspace.
 
-The current configuration demonstrates:
+The base configuration demonstrates:
 
 - Central deployment and lifecycle management of an edge collector through Azure Arc.
 - Syslog and preview OTLP log collection through one pipeline group.
@@ -36,7 +38,9 @@ The current configuration demonstrates:
 - Standard Syslog normalization with the `MicrosoftSyslog` processor and explicit OTLP field mapping.
 - Repeatable infrastructure deployment plus marker-based end-to-end ingestion checks.
 
-Both data paths are intentionally straight through. The DCR transformations are `source`; the Syslog path only applies the required `MicrosoftSyslog` processor; and the OTLP path retains only body, severity text, and timestamp. The demo does not currently configure edge filtering, redaction, aggregation, routing to multiple destinations, durable pipeline storage, autoscaling, or pipeline-health alerting. Those are extension opportunities, not deployed capabilities.
+The additive showcase in `demo/showcase.bicep` keeps the same infrastructure and receiver ports, then updates the DCR and pipeline group in place. It filters low-value health/debug records, redacts fixed synthetic values, preserves richer OTLP context, fans Syslog into a one-minute aggregation path, and enables persistent exporter queues. `setup-demo.ps1` creates the custom summary table and a single-node demo volume before applying that overlay. The pipeline's built-in Azure Monitor metrics provide CPU, memory, uptime, sent-record, and failed-record views; no custom workbook is required.
+
+The base `monitoring.bicep` remains intentionally straight through. Deploying it again replaces the showcase pipeline configuration, after which `setup-demo.ps1` must be rerun.
 
 ## Detailed system topology
 
@@ -60,7 +64,7 @@ flowchart LR
             customLocation[Custom location]
             dce[Data collection endpoint]
             dcr[Data collection rule]
-            law[Log Analytics workspace<br/>Syslog and OTelLogs_CL]
+            law[Log Analytics workspace<br/>Syslog, OTelLogs_CL,<br/>and EdgeLogSummary_CL]
             pipelineResource[Azure Monitor<br/>pipeline group]
         end
     end
@@ -70,7 +74,8 @@ flowchart LR
         certManager[Certificate management<br/>issuers and trust bundles]
         controller[Pipeline controller]
         traefik[Traefik TCP gateway<br/>ports 514 and 4317]
-        pipeline[Pipeline collector<br/>Syslog and OTLP receivers]
+        pipeline[Pipeline collector<br/>filter, redact, aggregate, buffer]
+        persistentVolume[Demo-only persistent volume]
     end
 
     operator -->|Azure CLI and ARM deployments| arm
@@ -83,6 +88,7 @@ flowchart LR
     customLocation -->|targets| arc
     pipelineResource -->|placed through| customLocation
     controller -->|reconciles| pipeline
+    pipeline <--> persistentVolume
 
     syslog -->|TCP 514| nsg
     otlp -->|gRPC over TCP 4317| nsg

@@ -1,15 +1,66 @@
 # 12-minute demo guide
 
-This runbook presents the repository as an edge telemetry control plane: Azure centrally defines and manages a pipeline running on Arc-enabled Kubernetes, while Syslog and OTLP data are processed close to their sources and exported to Azure Monitor.
+## What this demo is about
+
+Imagine a company with factories, hospitals, retail stores, or remote offices. Each site has older infrastructure that emits Syslog and newer applications that emit OpenTelemetry (OTLP). Sending every raw event directly across the WAN creates several problems:
+
+- Every site needs separately managed collection software and configuration.
+- Repetitive health messages consume bandwidth and paid ingestion without adding much investigative value.
+- Sensitive values can leave the site before a central team has a chance to remove them.
+- A WAN or Azure endpoint interruption can create a telemetry gap.
+- Operators need to know whether silence means a quiet source, a broken receiver, or a failed export.
+
+This demo represents one of those sites. Azure holds the centrally governed pipeline definition. Azure Arc carries that desired state to a collector running on Kubernetes at the site. The collector accepts both Syslog and OTLP, processes records before they leave the site, and exports the useful result to Azure Monitor through managed identity.
+
+The point is not merely that logs arrive in Log Analytics. The demo shows that the edge pipeline can make deliberate decisions about telemetry before transmission:
+
+1. **Unify old and new sources.** Network devices and appliances continue using Syslog while modern applications use OTLP.
+2. **Reduce noise and cost.** Low-value health and debug records are removed before WAN transfer and ingestion.
+3. **Minimize sensitive data.** Synthetic email and token values are redacted at the site rather than after storage.
+4. **Preserve trends without every raw event.** Repeated Syslog records become one-minute counts with useful dimensions.
+5. **Survive a temporary cloud-path failure.** Persistent queues retain outbound records and drain after connectivity returns.
+6. **Operate centrally.** Azure manages the pipeline configuration and exposes health metrics even though collection runs outside Azure.
+
+This is a scale-model of a distributed design: the demo deploys one single-node K3s site, while a real organization could apply the pattern to many Arc-enabled locations. Its public raw-protocol endpoints and local `hostPath` storage are demonstration choices, not a production reference architecture.
+
+## Real-world scenario map
+
+| Situation | Problem shown | What to demonstrate | Operational value |
+| --- | --- | --- | --- |
+| Hybrid data center modernization | Syslog appliances and OTLP applications coexist for years | Both receivers process one continuous, correlated run | Modernize telemetry without a flag-day source migration |
+| Retail branch or factory | WAN links and central ingestion are costly | Filtering and one-minute aggregation happen before export | Send fewer low-value records while retaining volume trends |
+| Hospital or regulated site | Raw messages may contain identifiers or credentials | Fixed synthetic values become redaction markers before arrival | Reduce data exposure and support data-minimization controls |
+| Remote office, mine, or vessel | Connectivity to Azure can be intermittent | Block the DCE path, keep sending, restore it, and query recovered sequences | Avoid an immediate telemetry gap during a short outage |
+| Central operations team | Distributed collectors drift and are difficult to troubleshoot | Show Arc reconciliation, declarative configuration, and pipeline metrics | Govern and observe edge collection from Azure |
+
+The audience should leave understanding the boundary: source systems send locally, the pipeline decides what is worth transmitting, and Azure Monitor remains the central analytics and operations destination.
 
 This guide assumes the operator has completed the [demo setup and readiness check](demo-setup.md). The showcase includes continuous Syslog and OTLP traffic, edge filtering and redaction, one-minute aggregation, persistent buffering, and built-in pipeline health metrics.
+
+## Existing deployment or new deployment?
+
+You do not need to start over when the repository's base infrastructure is already deployed. Do not rerun `deploy.ps1` or `complete-deployment.ps1` merely to add the showcase. Run the additive setup against the existing resource group and prefix, then run readiness:
+
+```powershell
+& .\setup-demo.ps1 `
+   -SubscriptionId '<subscription-id>' `
+   -ResourceGroupName '<existing-resource-group>' `
+   -NamePrefix '<existing-prefix>'
+
+& .\test-demo-readiness.ps1 `
+   -SubscriptionId '<subscription-id>' `
+   -ResourceGroupName '<existing-resource-group>' `
+   -NamePrefix '<existing-prefix>'
+```
+
+Only use the base deployment steps in the README when the VM, Arc-enabled cluster, workspace, DCE, pipeline group, and gateway do not already exist.
 
 ## Presenter preparation
 
 Complete this checklist before the audience joins.
 
-1. Deploy and complete the environment by following the [README](../README.md).
-2. Install the showcase by following [demo setup and operations](demo-setup.md).
+1. Confirm the base environment exists, or deploy it by following the [README](../README.md) when starting with an empty resource group.
+2. Install the additive showcase by following [demo setup and operations](demo-setup.md). Re-run setup after pulling changes to its storage preparation.
 3. Run the full readiness check:
 
    ```powershell

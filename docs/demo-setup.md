@@ -31,7 +31,7 @@ The setup performs these operations:
 - Adds a one-minute Syslog aggregation branch before raw-event filtering, preserving volume counts without storing every health record.
 - Enables persistent exporter queues.
 
-The volume uses `hostPath` and advertises `ReadWriteMany`. This is suitable only for this single-node demonstration. Use resilient shared storage that genuinely supports `ReadWriteMany` for a production or multi-node design.
+The volume uses `hostPath` and advertises `ReadWriteMany`. K3s runs the pipeline collector in a user namespace, so setup makes the dedicated synthetic buffer directory mode `0777`; container root otherwise cannot create queue segments on the host path. This permissive local path is suitable only for this isolated single-node demonstration and must not hold secrets or unrelated data. Use secured, resilient shared storage that genuinely supports `ReadWriteMany` for a production or multi-node design.
 
 The pipeline controller may take several minutes to reconcile the update. Re-running the original `monitoring.bicep` deployment restores the base straight-through configuration, so run `setup-demo.ps1` again afterward if that occurs.
 
@@ -47,6 +47,8 @@ Run the full preflight:
 ```
 
 The preflight verifies the Azure deployment, pipeline state, table schemas, built-in pipeline metrics, bound persistent volume, inactive outage control, ready receiver endpoints, public TCP reachability, and an end-to-end test run. The ingestion check can take several minutes because it waits for Log Analytics and the one-minute aggregation window.
+
+If the pipeline service has no ready endpoints, the check now prints pod status, collector restart details, and the latest collector startup error. A durable-buffer `Permission denied` error means the demo host path was prepared by an older script version; re-run `setup-demo.ps1` to repair its mode and reconcile the existing deployment.
 
 Use `-SkipIngestionTest` only for a quick structural check. Do not treat that reduced check as proof that the demo data path works.
 

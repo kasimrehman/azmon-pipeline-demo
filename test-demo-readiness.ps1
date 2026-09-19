@@ -144,18 +144,19 @@ Add-CheckResult 'Summary table schema' ($summaryMissing.Count -eq 0) $(
 )
 
 $pipelineResourceId = $pipelineJson.id
-$metricNames = (Invoke-DemoAzCli -Arguments @(
+$metricNamesOutput = (Invoke-DemoAzCli -Arguments @(
     'monitor', 'metrics', 'list-definitions',
     '--resource', $pipelineResourceId,
     '--query', '[].name.value',
     '--output', 'tsv',
     '--only-show-errors'
 ) -AllowFailure).Output
+$metricNames = @($metricNamesOutput -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $requiredMetrics = @(
     'process_cpu_utilization', 'process_memory_usage', 'process_uptime',
-    'exporter_sent_log_records', 'exporter_send_failed_log_records'
+    'exported_log_records', 'log_records_failed_to_export'
 )
-$missingMetrics = @($requiredMetrics | Where-Object { $metricNames -notmatch "(?m)^$([regex]::Escape($_))$" })
+$missingMetrics = @($requiredMetrics | Where-Object { $_ -notin $metricNames })
 Add-CheckResult 'Pipeline metrics' ($missingMetrics.Count -eq 0) $(
     if ($missingMetrics.Count -eq 0) { 'built-in health metrics available' } else { "missing $($missingMetrics -join ', ')" }
 )

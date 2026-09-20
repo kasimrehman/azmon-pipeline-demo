@@ -29,8 +29,8 @@ This is a scale-model of a distributed design: the demo deploys one single-node 
 flowchart LR
    workstation[Telemetry-sending workstation<br/>Syslog TCP/514 and OTLP gRPC/4317]
 
-   pipelineResource[Azure Monitor pipeline resource]
-   customLocation[Azure custom location]
+   pipelineResource[Azure Monitor pipeline resource<br/>azmon-pipeline]
+   customLocation[Azure custom location<br/>azmon-monitor<br/>Deployed resource: azmon-pipeline]
 
    subgraph cluster[Arc-enabled Kubernetes cluster]
       pipeline[Azure Monitor pipeline<br/>Receive Syslog and OTLP<br/>Filter and redact raw branches<br/>Aggregate Syslog summary branch<br/>Buffer durable branches<br/>Export custom streams]
@@ -47,8 +47,8 @@ flowchart LR
 
    workstation -->|Syslog and OTLP| pipeline
    pipeline -->|Processed streams<br/>DCE URL and DCR ID| dce
-   pipelineResource -.->|extendedLocation| customLocation
-   customLocation -.->|Host cluster and<br/>pipeline controller extension| pipeline
+   customLocation -.->|Contains deployed resource| pipelineResource
+   customLocation -.->|Backed by Arc cluster and<br/>pipeline controller extension| pipeline
    dce -->|Ingest Custom-RawSyslog| raw
    dce -->|Ingest Custom-OTLP| otlp
    dce -->|Ingest Custom-EdgeLogSummary| summary
@@ -62,7 +62,17 @@ Filtering, redaction, aggregation, and persistent buffering happen in the **Azur
 
 The Arc-enabled Kubernetes cluster is not a data source. The workstation is the source because it sends Syslog and OTLP to the pipeline receivers. The cluster is the pipeline's execution location. The association is a placement chain: the `microsoft.monitor.pipelinecontroller` extension is installed on the Arc-connected cluster, the custom location references that cluster and extension, and the pipeline resource's `extendedLocation` references the custom location. That is why the pipeline's dataflows and DCR do not list the cluster as a source.
 
-In an Azure portal creation flow, select this relationship on **Basics** using **Cluster name** and **Custom location**. It is not configured on **Dataflows** or in the DCR. For this Bicep-deployed showcase, open the pipeline **Overview** and inspect its **Custom location**, then open that custom location to follow its host-resource relationship to the Arc-enabled cluster. The solid arrows in the diagram are telemetry flow; the placement text and dotted DCR arrows describe control-plane relationships.
+In an Azure portal creation flow, select this relationship on **Basics** using **Cluster name** and **Custom location**. It is not configured on **Dataflows** or in the DCR. A DCR therefore does not contain a pointer to the cluster.
+
+For this existing Bicep deployment, prove the association entirely in the Azure portal:
+
+1. Search for and open **Custom locations** in the Azure portal.
+2. Open the custom location `azmon-monitor`.
+3. In its deployed resources, find `azmon-pipeline`. This is the Azure Monitor pipeline deployed to that custom location.
+4. On the custom location overview, identify `azmon-k3s` as the connected cluster and `azure-monitor-pipeline` as the supporting cluster extension.
+5. Optionally open the Arc-enabled Kubernetes resource `azmon-k3s`, select **Extensions**, and verify that `azure-monitor-pipeline` is installed.
+
+This gives the visible placement chain `azmon-monitor` → `azmon-pipeline`, backed by `azmon-k3s` and the `azure-monitor-pipeline` extension. The solid arrows in the diagram are telemetry flow; the placement and DCR dotted arrows describe control-plane relationships. The DCR is not part of the placement chain and does not contain a cluster reference.
 
 ## Real-world scenario map
 
@@ -137,6 +147,7 @@ Complete this checklist before the audience joins.
 7. Open and arrange these views before presenting:
    - This guide at **End-to-end data flow**.
    - **Azure Monitor** > **Pipelines** > `<prefix>-pipeline`.
+   - **Custom locations** > `<prefix>-monitor`, with `<prefix>-pipeline` visible under its deployed resources.
    - The pipeline's **Dataflows** configuration.
    - The Arc-enabled Kubernetes resource and its Extensions page.
    - Log Analytics Logs with saved Syslog and OTLP queries.
@@ -224,6 +235,8 @@ The pipeline creates `Custom-EdgeLogSummary` from the Syslog branch before raw f
 ### Portal navigation used in this guide
 
 In the Azure portal, search for and open **Azure Monitor**, select **Pipelines**, and then select `<prefix>-pipeline`. This is the primary presentation surface. Use its **Dataflows** experience to explain each source, listening port, transformation, destination workspace, and destination table. Use **Monitoring** > **Metrics** for pipeline health and the Log Analytics workspace **Logs** page for the resulting records.
+
+To show where the pipeline is deployed, search for and open **Custom locations**, select `<prefix>-monitor`, and point out `<prefix>-pipeline` under its deployed resources. This is the clearest portal proof that the pipeline is placed on the custom location backed by the Arc-enabled cluster.
 
 This showcase was deployed from Bicep because it uses advanced configuration beyond the portal's guided creation experience. The portal can present the pipeline and its logical dataflows, but the current guided UI doesn't expose every advanced setting, including the persistent-volume name, exporter queue limits, custom record maps, or a custom batch interval. Do not open **JSON View** during the normal demo. Prove those advanced behaviors with the readiness and recovery checks below; use the Bicep definition only as optional engineering follow-up.
 

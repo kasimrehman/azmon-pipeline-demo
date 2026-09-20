@@ -122,7 +122,7 @@ All resources are placed in one dedicated resource group and tagged with `worklo
 | Custom table | `RawSyslog_CL` | Stores normalized raw Syslog fields retained after showcase filtering and redaction. |
 | Custom table | `EdgeLogSummary_CL` | Stores one-minute Syslog event counts before raw-event filtering. |
 | Data collection rule | `<prefix>-pipeline-dcr` | Maps the pipeline streams to the workspace and their destination tables. |
-| Pipeline group | `<prefix>-pipeline` | Declares receivers, processing, exporters, and the two log pipelines scheduled through the custom location. |
+| Pipeline group | `<prefix>-pipeline` | Declares receivers, processing, exporters, and the three log pipelines scheduled through the custom location. |
 
 The VM uses a 64 GiB Premium SSD OS disk and defaults to `Standard_D4as_v5`. SSH key authentication is configured because Azure requires an administrator credential, but the network security group does not expose TCP/22. The Kubernetes API is also not published. Administrative guest actions use Azure VM Run Command.
 

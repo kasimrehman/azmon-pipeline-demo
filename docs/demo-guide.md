@@ -610,7 +610,20 @@ After restoration, the recovery script queries Log Analytics until all phases ca
 [PASS] Persistent recovery: OTLP retained all <retained> filtered records across the outage, the summary retained all <sent> source events, and raw Syslog resumed after restoration for <run-id>.
 ```
 
-For an audience drill-down, use the printed recovery run ID:
+For an audience drill-down, use the printed recovery run ID to check all three branches.
+
+**Raw Syslog resumption (nonpersistent):** Plot the records by their source event time. Expect records before the outage, a possible gap while the DCE route is blocked, and new records after restoration.
+
+```kusto
+let RunId = "RECOVERY-...";
+RawSyslog_CL
+| where SyslogMessage contains RunId
+| summarize Retained=count() by bin(TimeGenerated, 10s)
+| order by TimeGenerated asc
+| render timechart
+```
+
+**OTLP recovery (persistent):** Confirm that the retained row count and distinct sequence count match the recovery script's expected filtered count. `First` and `Last` are source event times, so they span the outage even though the queued rows arrive after restoration.
 
 ```kusto
 let RunId = "RECOVERY-...";
@@ -618,6 +631,8 @@ OTelLogs_CL
 | where DemoRunId == RunId
 | summarize Retained=count(), DistinctSequences=dcount(SequenceNumber), First=min(TimeGenerated), Last=max(TimeGenerated)
 ```
+
+**Syslog summary recovery (persistent):** Confirm that `SourceEvents` matches the sender's total Syslog count. This proves the summary exporter drained all queued aggregate evidence after restoration.
 
 ```kusto
 let RunId = "RECOVERY-...";

@@ -1,6 +1,6 @@
 # Architecture
 
-This page describes the complete architecture of the standalone Arc-enabled Azure Monitor pipeline demo. For deployment and validation commands, see the [project README](../README.md). For showcase installation, see [demo setup and operations](demo-setup.md). For the timed walkthrough, see the [12-minute demo guide](demo-guide.md).
+This page describes the complete architecture of the standalone Arc-enabled Azure Monitor pipeline demo. For deployment and validation commands, see [basic setup](basic-setup.md). For showcase installation, see [demo setup and operations](demo-setup.md). For the timed walkthrough, see the [12-minute demo guide](../README.md).
 
 ## Purpose and scope
 

@@ -1,12 +1,12 @@
 # Demo setup and operations
 
-This page is for the operator preparing the full Azure Monitor pipeline showcase. The customer-facing presentation is in the [12-minute demo guide](demo-guide.md).
+This page is for the operator preparing the full Azure Monitor pipeline showcase. The customer-facing presentation is in the [12-minute demo guide](../README.md).
 
 The showcase is an additive update to the base deployment. It keeps the VM, network, Arc cluster, extensions, custom location, gateway, workspace, DCE, and public endpoints. It updates the existing DCR and pipeline group, expands `OTelLogs_CL`, and adds `RawSyslog_CL` and `EdgeLogSummary_CL`.
 
 ## Prerequisites
 
-1. Complete both deployment phases in the [README](../README.md).
+1. Complete both deployment phases in [basic setup](basic-setup.md).
 2. Use a workstation whose public IPv4 address is covered by the deployment's `AllowedSourceCidr`.
 3. Install Azure CLI, PowerShell, and Python 3, then authenticate with `az login`.
 4. Confirm the operator can update the resource group, DCR, pipeline group, Log Analytics tables, and invoke VM Run Command.

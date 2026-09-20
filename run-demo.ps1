@@ -34,7 +34,10 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string] $StopFilePath
+    [string] $StopFilePath,
+
+    [Parameter()]
+    [switch] $ShowPayloadSample
 )
 
 Set-StrictMode -Version Latest
@@ -107,6 +110,9 @@ $emitterArguments = @(
 )
 if ($StopFilePath) {
     $emitterArguments += @('--stop-file', $StopFilePath)
+}
+if ($ShowPayloadSample) {
+    $emitterArguments += '--show-payload-sample'
 }
 
 & $python $emitter @emitterArguments

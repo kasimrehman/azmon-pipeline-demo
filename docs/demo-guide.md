@@ -89,7 +89,8 @@ Complete this checklist before the audience joins.
        -Endpoint $endpoint `
        -DurationMinutes 10 `
        -EventsPerSecond 5 `
-       -RunId $runId
+         -RunId $runId `
+         -ShowPayloadSample
    ```
 
 6. Verify the readiness script's `PREFLIGHT-...` run in Log Analytics.
@@ -100,7 +101,7 @@ Complete this checklist before the audience joins.
    - The Azure Monitor pipeline group configuration.
    - Log Analytics Logs with saved Syslog and OTLP queries.
    - The pipeline group **Metrics** blade.
-   - `demo/showcase.bicep` at the pipeline processors and service pipelines.
+   - The pipeline group's **JSON View** at the receivers, processors, exporters, and service pipelines.
 8. Start the bounded generator one or two minutes before the live query segment so data is already arriving.
 9. Run `test-demo-recovery.ps1` on the same deployed version. Keep the restore command ready in a separate terminal during the presentation.
 10. Use the staged run ID in every query and chart.
@@ -110,6 +111,8 @@ Complete this checklist before the audience joins.
 The rest of this guide is organized by feature. Every feature identifies where its configuration is visible, what effect it should have, and where to verify that effect.
 
 Keep the generator terminal visible and use its run ID in every query. With the staged command above, each protocol sends 5 events per second for 10 minutes:
+
+The normal command output contains status and counters, not every event body. `-ShowPayloadSample` adds one `source-sample` JSON line for retained sequence 3. It displays the exact pre-pipeline Syslog wire message and OTLP body, including the synthetic plaintext `demo.user@example.com` and `demo-token-123`. It does not print every event or any real secret.
 
 | Evidence | Expected after ingestion settles |
 | --- | --- |
@@ -126,7 +129,7 @@ The generator repeats a ten-event pattern. Five health/debug events are filtered
 
 ### 0:00-1:15 - Feature: Azure-managed edge deployment
 
-**Where the feature is set up:** In the Azure portal, open the resource group and show the Arc-enabled Kubernetes resource, its **Extensions** page, the `<prefix>-monitor` custom location, and the `<prefix>-pipeline` pipeline group. In source, show the `extendedLocation`, `receivers`, `processors`, `exporters`, and `service.pipelines` sections in [`demo/showcase.bicep`](../demo/showcase.bicep).
+**Where the feature is set up:** In the Azure portal, open the resource group and show the Arc-enabled Kubernetes resource, its **Extensions** page, the `<prefix>-monitor` custom location, and the `<prefix>-pipeline` pipeline group. On the pipeline group, open **JSON View** and point out `extendedLocation`, which places the resource through the custom location.
 
 **Expected telemetry effect:** Placement itself does not add or alter a Log Analytics row. Its observable effect is that the Azure pipeline definition is reconciled into a ready collector on K3s, allowing the later feature checks to succeed.
 
@@ -136,7 +139,7 @@ The generator repeats a ten-event pattern. Five health/debug events are filtered
 
 ### 1:15-3:00 - Feature: Unified Syslog and OTLP collection
 
-**Where the feature is set up:** Open the pipeline group's **JSON View** in the Azure portal, or show the `syslog-receiver`, `otlp-receiver`, and three `service.pipelines` entries in [`demo/showcase.bicep`](../demo/showcase.bicep). Point out Syslog TCP/514 and OTLP gRPC/4317, then show the DCR streams `Custom-RawSyslog` and `Custom-OTLP` and their destination tables.
+**Where the feature is set up:** In the Azure portal, open the `<prefix>-pipeline` pipeline group's **JSON View**. Point out `syslog-receiver` on TCP/514, `otlp-receiver` on TCP/4317, and the three entries under `service.pipelines`. Then open `<prefix>-pipeline-dcr` **JSON View** and show the `Custom-RawSyslog` and `Custom-OTLP` stream declarations and data flows to their destination tables.
 
 **Expected telemetry effect:** The same run ID appears through both protocols. After filtering, the standard run retains 1,500 rows in `RawSyslog_CL` and 1,500 rows in `OTelLogs_CL`. OTLP rows also retain sequence, service, site, trace, duration, and event-class fields.
 
@@ -175,7 +178,7 @@ OTelLogs_CL
 
 ### 3:00-4:15 - Feature: Edge filtering
 
-**Where the feature is set up:** In the pipeline group's JSON or [`demo/showcase.bicep`](../demo/showcase.bicep), show the `syslog-filter-redact` and `otlp-filter-redact` `TransformLanguage` processors. The Syslog statement removes `event_class=health` and debug severity; the OTLP statement removes health bodies and `DEBUG` severity.
+**Where the feature is set up:** In the Azure portal, open the `<prefix>-pipeline` pipeline group's **JSON View** and find `syslog-filter-redact` and `otlp-filter-redact` under `processors`. The Syslog statement removes `event_class=health` and debug severity; the OTLP statement removes health bodies and `DEBUG` severity. Under `service.pipelines`, show that both raw pipelines invoke these processors before their exporters.
 
 **Expected telemetry effect:** Five of every ten generated events are health/debug records and must be absent from both raw tables. The standard run therefore retains 1,500 of 3,000 records per protocol, with zero retained health or debug records.
 
@@ -209,11 +212,28 @@ union
 
 ### 4:15-5:30 - Feature: Edge redaction
 
-**Where the feature is set up:** In the same two `TransformLanguage` processors, show the nested `replace_string` calls that replace `demo.user@example.com` and `demo-token-123` with `[REDACTED_EMAIL]` and `[REDACTED_TOKEN]`.
+**Where the feature is set up:** In the Azure portal, keep the `<prefix>-pipeline` pipeline group's **JSON View** open at the same two `TransformLanguage` processors. Show the nested `replace_string` calls that replace `demo.user@example.com` and `demo-token-123` with `[REDACTED_EMAIL]` and `[REDACTED_TOKEN]`.
 
 **Expected telemetry effect:** No retained row contains either original synthetic value. Every retained row contains both redaction markers, so the standard run produces 1,500 email markers and 1,500 token markers in each raw table.
 
-**How and where to check:** In Log Analytics **Logs**, run:
+**How and where to check:** First show the generator terminal's `source-sample` line. Sequence 3 contains `email=demo.user@example.com` in both `syslogWireMessage` and `otlpBody`; this is the plaintext source before edge processing. Then, in the Azure portal, open the Log Analytics workspace **Logs** blade and query that exact run and sequence:
+
+```kusto
+let RunId = "DEMO-20260919-01";
+union
+(
+   RawSyslog_CL
+   | where TimeGenerated > ago(30m) and SyslogMessage contains RunId and SyslogMessage contains "sequence=3 "
+   | project Path="Syslog", StoredBody=SyslogMessage
+),
+(
+   OTelLogs_CL
+   | where TimeGenerated > ago(30m) and DemoRunId == RunId and SequenceNumber == 3
+   | project Path="OTLP", StoredBody=Body
+)
+```
+
+The two stored rows should contain `email=[REDACTED_EMAIL]` and `token=[REDACTED_TOKEN]`. Next run the aggregate leak check:
 
 ```kusto
 let RunId = "DEMO-20260919-01";
@@ -245,7 +265,7 @@ union
 
 ### 5:30-7:00 - Feature: One-minute edge aggregation
 
-**Where the feature is set up:** In the pipeline definition, show `summary-batch`, the `syslog-summary` transform, and `syslog-summary-pipeline`. This branch receives the Syslog stream before raw-event filtering, groups records by minute, run ID, site, and severity, and exports to `EdgeLogSummary_CL`.
+**Where the feature is set up:** In the Azure portal, open the `<prefix>-pipeline` pipeline group's **JSON View**. Show `summary-batch` and `syslog-summary` under `processors`, then show `syslog-summary-pipeline` under `service.pipelines`. This branch receives the Syslog stream before raw-event filtering, groups records by minute, run ID, site, and severity, and exports to `EdgeLogSummary_CL`.
 
 **Expected telemetry effect:** Summary rows represent all Syslog source events, including health/debug events removed from `RawSyslog_CL`. For the standard run, `sum(EventCount)` is 3,000 while the raw table contains 1,500 rows. The expected severity totals are 1,500 debug, 900 informational, 300 warning, and 300 error events.
 
@@ -281,7 +301,7 @@ EdgeLogSummary_CL
 
 ### 7:00-9:30 - Feature: Persistent outage recovery
 
-**Where the feature is set up:** In the pipeline group's JSON or [`demo/showcase.bicep`](../demo/showcase.bicep), show `persistence` on `otlp-exporter` and `syslog-summary-exporter`, plus `service.persistence.persistentVolumeName`. The raw Syslog exporter intentionally has no persistence because extension `1.7.0` stalls that exporter when persistence is enabled.
+**Where the feature is set up:** In the Azure portal, open the `<prefix>-pipeline` pipeline group's **JSON View**. Show `persistence` on `otlp-exporter` and `syslog-summary-exporter`, then show `service.persistence.persistentVolumeName`. Point out that `syslog-exporter-v3` intentionally has no persistence because extension `1.7.0` stalls that exporter when persistence is enabled.
 
 **Expected telemetry effect:** During a temporary DCE-path interruption, OTLP records and Syslog summaries queue locally and drain after restoration. The recovery run must retain every expected filtered OTLP sequence and every summarized Syslog source event. Raw Syslog is not lossless during the interruption; it must resume after restoration.
 
@@ -332,7 +352,7 @@ EdgeLogSummary_CL
 
 ### 10:45-12:00 - Feature: Layered security and declarative governance
 
-**Where the feature is set up:** Show `<prefix>-nsg` **Inbound security rules** for source-restricted TCP/514 and TCP/4317. Show the `azure-cert-management` extension on the Arc cluster. In [`configure-gateway.sh`](../configure-gateway.sh), show the client certificate and `ServersTransportTCP` with `insecureSkipVerify: false`. On `<prefix>-pipeline-dcr`, show **Access control (IAM)** with `Monitoring Metrics Publisher` assigned to the pipeline extension identity. Finally, show [`demo/showcase.bicep`](../demo/showcase.bicep) as the declarative pipeline definition.
+**Where the feature is set up:** Use the Azure portal for each visible control: show `<prefix>-nsg` **Inbound security rules** for source-restricted TCP/514 and TCP/4317; show the `azure-cert-management` extension on the Arc cluster; open `<prefix>-pipeline-dcr` **Access control (IAM)** and show `Monitoring Metrics Publisher` assigned to the pipeline extension identity; and open the pipeline group's **JSON View** to show the centrally managed definition. The in-cluster client certificate and strict server verification are runtime gateway resources rather than Azure Resource Manager fields, so treat the previously passed readiness check as their live proof.
 
 **Expected telemetry effect:** Security controls do not add special application rows. Successful records in all three tables prove that the permitted source, mTLS backend hop, managed-identity export, DCE, and DCR path work together. The redaction check proves that the original synthetic sensitive values do not reach storage.
 

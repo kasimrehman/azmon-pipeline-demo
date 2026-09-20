@@ -58,6 +58,7 @@ def parse_args():
     parser.add_argument("--otlp-port", type=int, default=4317)
     parser.add_argument("--timeout-seconds", type=int, default=10)
     parser.add_argument("--stop-file")
+    parser.add_argument("--show-payload-sample", action="store_true")
     return parser.parse_args()
 
 
@@ -108,7 +109,7 @@ def event_for(run_id, sequence):
     return event_class, severity_text, log_level, syslog_severity, duration_ms, trace_id
 
 
-def send_syslog(connection, args, sequence, event):
+def create_syslog_message(args, sequence, event):
     event_class, severity_text, _log_level, syslog_severity, duration_ms, trace_id = event
     priority = 8 + syslog_severity
     timestamp = utc_now()
@@ -122,30 +123,43 @@ def send_syslog(connection, args, sequence, event):
         f"<{priority}>1 {timestamp} demo-sender arc-monitor-demo {sequence} "
         f"DEMO - {body}\n"
     )
+    return message
+
+
+def send_syslog(connection, args, sequence, event):
+    message = create_syslog_message(args, sequence, event)
     connection.sendall(message.encode("utf-8"))
+    return message
 
 
-def send_otlp(logger, args, sequence, event):
+def create_otlp_payload(args, sequence, event):
     event_class, severity_text, log_level, _syslog_severity, duration_ms, trace_id = event
     body = (
         f"run_id={args.run_id} sequence={sequence} event_class={event_class} "
         "email=demo.user@example.com token=demo-token-123"
     )
+    attributes = {
+        "DemoRunId": args.run_id,
+        "SequenceNumber": sequence,
+        "ServiceName": "checkout-api",
+        "DeploymentEnvironment": "demo",
+        "Site": "edge-01",
+        "TraceId": trace_id,
+        "DurationMs": duration_ms,
+        "EventClass": event_class,
+        "SeverityText": severity_text,
+    }
+    return body, attributes, log_level
+
+
+def send_otlp(logger, args, sequence, event):
+    body, attributes, log_level = create_otlp_payload(args, sequence, event)
     logger.log(
         log_level,
         body,
-        extra={
-            "DemoRunId": args.run_id,
-            "SequenceNumber": sequence,
-            "ServiceName": "checkout-api",
-            "DeploymentEnvironment": "demo",
-            "Site": "edge-01",
-            "TraceId": trace_id,
-            "DurationMs": duration_ms,
-            "EventClass": event_class,
-            "SeverityText": severity_text,
-        },
+        extra=attributes,
     )
+    return body, attributes
 
 
 def main():
@@ -192,11 +206,26 @@ def main():
         ):
             sequence += 1
             event = event_for(args.run_id, sequence)
-            send_syslog(syslog_connection, args, sequence, event)
+            syslog_message = send_syslog(syslog_connection, args, sequence, event)
             counts["syslog"] += 1
-            send_otlp(logger, args, sequence, event)
+            otlp_body, otlp_attributes = send_otlp(logger, args, sequence, event)
             counts["otlp"] += 1
             counts[event[0]] += 1
+
+            if args.show_payload_sample and sequence == 3:
+                print(
+                    json.dumps(
+                        {
+                            "status": "source-sample",
+                            "note": "Exact payload sent before edge processing; synthetic values only.",
+                            "sequence": sequence,
+                            "syslogWireMessage": syslog_message.rstrip("\n"),
+                            "otlpBody": otlp_body,
+                            "otlpAttributes": otlp_attributes,
+                        }
+                    ),
+                    flush=True,
+                )
 
             if sequence % max(args.events_per_second * 10, 1) == 0:
                 print(

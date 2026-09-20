@@ -65,21 +65,41 @@ function Get-TableColumns {
 function Get-QueryRows {
     param(
         [Parameter(Mandatory)][string] $WorkspaceCustomerId,
-        [Parameter(Mandatory)][string] $Query
+        [Parameter(Mandatory)][string] $Query,
+        [Parameter(Mandatory)][string] $QueryName
     )
 
+    $singleLineQuery = ($Query -replace '\r?\n', ' ').Trim()
     $result = Invoke-DemoAzCli -Arguments @(
         'monitor', 'log-analytics', 'query',
         '--workspace', $WorkspaceCustomerId,
-        '--analytics-query', $Query,
+        '--analytics-query', $singleLineQuery,
         '--timespan', 'PT30M',
         '--output', 'json',
         '--only-show-errors'
     ) -AllowFailure
     if ($result.ExitCode -ne 0) {
+        $details = ConvertTo-DemoSanitizedOutput -Value $result.Output
+        Write-Warning "$QueryName query failed: $details"
         return @()
     }
     return @($result.Output | ConvertFrom-Json)
+}
+
+function Get-QueryValue {
+    param(
+        [Parameter(Mandatory)][object[]] $Rows,
+        [Parameter(Mandatory)][string] $Name
+    )
+
+    if ($Rows.Count -eq 0) {
+        return 0L
+    }
+    $property = $Rows[0].PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value) {
+        return 0L
+    }
+    return [long] $property.Value
 }
 
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
@@ -126,6 +146,16 @@ $workspaceJson = (Invoke-DemoAzCli -Arguments @(
 $workspaceResourceId = $workspaceJson.id
 $workspaceCustomerId = $workspaceJson.customerId
 
+$rawSyslogRequired = @(
+    'TimeGenerated', 'CollectorHostName', 'Computer', 'EventTime', 'Facility', 'HostIP',
+    'HostName', 'ProcessID', 'ProcessName', 'SeverityLevel', 'SourceSystem', 'SyslogMessage'
+)
+$rawSyslogColumns = Get-TableColumns -WorkspaceResourceId $workspaceResourceId -TableName 'RawSyslog_CL'
+$rawSyslogMissing = @($rawSyslogRequired | Where-Object { $_ -notin $rawSyslogColumns })
+Add-CheckResult 'Raw Syslog table schema' ($rawSyslogMissing.Count -eq 0) $(
+    if ($rawSyslogMissing.Count -eq 0) { 'all showcase columns present' } else { "missing $($rawSyslogMissing -join ', ')" }
+)
+
 $otlpRequired = @(
     'TimeGenerated', 'Body', 'SeverityText', 'DemoRunId', 'SequenceNumber',
     'ServiceName', 'DeploymentEnvironment', 'Site', 'TraceId', 'DurationMs', 'EventClass'
@@ -161,52 +191,90 @@ Add-CheckResult 'Pipeline metrics' ($missingMetrics.Count -eq 0) $(
     if ($missingMetrics.Count -eq 0) { 'built-in health metrics available' } else { "missing $($missingMetrics -join ', ')" }
 )
 
-$clusterScript = Join-Path $PSScriptRoot 'demo\check-demo-cluster.sh'
-$clusterResult = $null
-try {
-    $clusterResult = Invoke-DemoVmShellScript `
-        -SubscriptionId $SubscriptionId `
-        -ResourceGroupName $ResourceGroupName `
-        -VmName $vmName `
-        -ScriptPath $clusterScript `
-        -ScriptArguments @('azure-monitor-pipeline', $pipelineName, $persistentVolumeName)
-    Add-CheckResult 'Cluster runtime' $true ($clusterResult -replace "`r?`n", '; ')
-}
-catch {
-    Add-CheckResult 'Cluster runtime' $false $_.Exception.Message
-}
-
-$endpoint = (Invoke-DemoAzCli -Arguments @(
-    'network', 'public-ip', 'show',
+$vmStateResult = Invoke-DemoAzCli -Arguments @(
+    'vm', 'get-instance-view',
     '--subscription', $SubscriptionId,
     '--resource-group', $ResourceGroupName,
-    '--name', "$NamePrefix-pip",
-    '--query', 'ipAddress',
+    '--name', $vmName,
+    '--query', "instanceView.statuses[?starts_with(code, 'PowerState/')].code | [0]",
     '--output', 'tsv',
     '--only-show-errors'
-)).Output
-foreach ($port in @(514, 4317)) {
-    $client = [Net.Sockets.TcpClient]::new()
+) -AllowFailure
+$vmPowerState = $vmStateResult.Output.Trim()
+$vmRunning = $vmStateResult.ExitCode -eq 0 -and $vmPowerState -eq 'PowerState/running'
+if ($vmRunning) {
+    Add-CheckResult 'VM power state' $true $vmPowerState
+}
+else {
+    $vmStateDetails = if ($vmStateResult.ExitCode -ne 0) {
+        ConvertTo-DemoSanitizedOutput -Value $vmStateResult.Output
+    } elseif ([string]::IsNullOrWhiteSpace($vmPowerState)) {
+        'unknown'
+    } else {
+        $vmPowerState
+    }
+    $startCommand = "az vm start --subscription '$SubscriptionId' --resource-group '$ResourceGroupName' --name '$vmName'"
+    Add-CheckResult 'VM power state' $false "$vmStateDetails. Start it with: $startCommand"
+}
+
+if ($vmRunning) {
+    $clusterScript = Join-Path $PSScriptRoot 'demo\check-demo-cluster.sh'
+    $clusterResult = $null
     try {
-        $connected = $client.ConnectAsync($endpoint, $port).Wait([TimeSpan]::FromSeconds(10)) -and $client.Connected
-        Add-CheckResult "TCP $port" $connected "${endpoint}:$port"
+        $clusterResult = Invoke-DemoVmShellScript `
+            -SubscriptionId $SubscriptionId `
+            -ResourceGroupName $ResourceGroupName `
+            -VmName $vmName `
+            -ScriptPath $clusterScript `
+            -ScriptArguments @('azure-monitor-pipeline', $pipelineName, $persistentVolumeName)
+        Add-CheckResult 'Cluster runtime' $true ($clusterResult -replace "`r?`n", '; ')
     }
     catch {
-        Add-CheckResult "TCP $port" $false $_.Exception.Message
+        Add-CheckResult 'Cluster runtime' $false $_.Exception.Message
     }
-    finally {
-        $client.Dispose()
+
+    $endpoint = (Invoke-DemoAzCli -Arguments @(
+        'network', 'public-ip', 'show',
+        '--subscription', $SubscriptionId,
+        '--resource-group', $ResourceGroupName,
+        '--name', "$NamePrefix-pip",
+        '--query', 'ipAddress',
+        '--output', 'tsv',
+        '--only-show-errors'
+    )).Output
+    foreach ($port in @(514, 4317)) {
+        $client = [Net.Sockets.TcpClient]::new()
+        try {
+            $connected = $client.ConnectAsync($endpoint, $port).Wait([TimeSpan]::FromSeconds(10)) -and $client.Connected
+            Add-CheckResult "TCP $port" $connected "${endpoint}:$port"
+        }
+        catch {
+            Add-CheckResult "TCP $port" $false $_.Exception.Message
+        }
+        finally {
+            $client.Dispose()
+        }
     }
+}
+else {
+    Write-Host '[SKIP] Cluster runtime and receiver ports: VM is not running.'
 }
 
 if (-not $SkipIngestionTest -and $failures.Count -eq 0) {
+    $preflightDurationMinutes = 0.2
+    $preflightEventsPerSecond = 2
+    $expectedSentCount = [int]($preflightDurationMinutes * 60 * $preflightEventsPerSecond)
+    $retainedPatternIndexes = @(2, 4, 6, 8, 9)
+    $expectedRetainedCount = @(0..($expectedSentCount - 1) | Where-Object {
+        ($_ % 10) -in $retainedPatternIndexes
+    }).Count
     $runId = 'PREFLIGHT-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')
     Write-Host ''
     Write-Host "Sending a short preflight run: $runId"
     & (Join-Path $PSScriptRoot 'run-demo.ps1') `
         -Endpoint $endpoint `
-        -DurationMinutes 0.2 `
-        -EventsPerSecond 2 `
+        -DurationMinutes $preflightDurationMinutes `
+        -EventsPerSecond $preflightEventsPerSecond `
         -RunId $runId
     if ($LASTEXITCODE -ne 0) {
         $failures.Add('Ingestion sender failed.')
@@ -216,38 +284,50 @@ if (-not $SkipIngestionTest -and $failures.Count -eq 0) {
         $deadline = [DateTime]::UtcNow.AddMinutes($MaxIngestionWaitMinutes)
         $ingestionPassed = $false
         do {
-            $syslogRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -Query @"
-Syslog
+            $syslogRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'RawSyslog_CL' -Query @"
+RawSyslog_CL
 | where TimeGenerated > ago(30m) and SyslogMessage contains '$escapedRunId'
 | summarize Count=count(), Leaks=countif(SyslogMessage contains 'demo.user@example.com' or SyslogMessage contains 'demo-token-123'), Health=countif(SyslogMessage contains 'event_class=health'), Redacted=countif(SyslogMessage contains '[REDACTED_')
 "@)
-            $otlpRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -Query @"
+            $otlpRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'OTelLogs_CL' -Query @"
 OTelLogs_CL
 | where TimeGenerated > ago(30m) and DemoRunId == '$escapedRunId'
 | summarize Count=count(), Leaks=countif(Body contains 'demo.user@example.com' or Body contains 'demo-token-123'), Health=countif(EventClass == 'health'), Redacted=countif(Body contains '[REDACTED_')
 "@)
-            $summaryRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -Query @"
+            $summaryRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'EdgeLogSummary_CL' -Query @"
 EdgeLogSummary_CL
 | where TimeGenerated > ago(30m) and DemoRunId == '$escapedRunId'
 | summarize Rows=count(), Events=sum(EventCount)
 "@)
 
-            if ($syslogRows.Count -gt 0 -and $otlpRows.Count -gt 0 -and $summaryRows.Count -gt 0) {
-                $syslog = $syslogRows[0]
-                $otlp = $otlpRows[0]
-                $summary = $summaryRows[0]
-                $ingestionPassed = (
-                    [long]$syslog.Count -ge 8 -and [long]$syslog.Leaks -eq 0 -and [long]$syslog.Health -eq 0 -and [long]$syslog.Redacted -gt 0 -and
-                    [long]$otlp.Count -ge 8 -and [long]$otlp.Leaks -eq 0 -and [long]$otlp.Health -eq 0 -and [long]$otlp.Redacted -gt 0 -and
-                    [long]$summary.Rows -gt 0 -and [long]$summary.Events -ge 16
-                )
-                if ($ingestionPassed) {
-                    Add-CheckResult 'End-to-end ingestion' $true "run $runId arrived with filtering, redaction, and aggregation"
-                    break
-                }
+            $syslogCount = Get-QueryValue -Rows $syslogRows -Name 'Count'
+            $syslogLeaks = Get-QueryValue -Rows $syslogRows -Name 'Leaks'
+            $syslogHealth = Get-QueryValue -Rows $syslogRows -Name 'Health'
+            $syslogRedacted = Get-QueryValue -Rows $syslogRows -Name 'Redacted'
+            $otlpCount = Get-QueryValue -Rows $otlpRows -Name 'Count'
+            $otlpLeaks = Get-QueryValue -Rows $otlpRows -Name 'Leaks'
+            $otlpHealth = Get-QueryValue -Rows $otlpRows -Name 'Health'
+            $otlpRedacted = Get-QueryValue -Rows $otlpRows -Name 'Redacted'
+            $summaryRowCount = Get-QueryValue -Rows $summaryRows -Name 'Rows'
+            $summaryEventCount = Get-QueryValue -Rows $summaryRows -Name 'Events'
+
+            $ingestionPassed = (
+                $syslogCount -eq $expectedRetainedCount -and $syslogLeaks -eq 0 -and $syslogHealth -eq 0 -and $syslogRedacted -eq $expectedRetainedCount -and
+                $otlpCount -eq $expectedRetainedCount -and $otlpLeaks -eq 0 -and $otlpHealth -eq 0 -and $otlpRedacted -eq $expectedRetainedCount -and
+                $summaryRowCount -gt 0 -and $summaryEventCount -eq $expectedSentCount
+            )
+            if ($ingestionPassed) {
+                Add-CheckResult 'End-to-end ingestion' $true "run $runId arrived with filtering, redaction, and aggregation"
+                break
             }
-            Write-Host 'Waiting for transformed records and the one-minute aggregate...'
-            Start-Sleep -Seconds 20
+
+            $syslogProgress = "Syslog $syslogCount/$expectedRetainedCount (redacted=$syslogRedacted, leaks=$syslogLeaks, health=$syslogHealth)"
+            $otlpProgress = "OTLP $otlpCount/$expectedRetainedCount (redacted=$otlpRedacted, leaks=$otlpLeaks, health=$otlpHealth)"
+            $summaryProgress = "Summary $summaryEventCount/$expectedSentCount events in $summaryRowCount row(s)"
+            Write-Host "Waiting for ingestion: $syslogProgress; $otlpProgress; $summaryProgress."
+            if ([DateTime]::UtcNow -lt $deadline) {
+                Start-Sleep -Seconds 20
+            }
         } while ([DateTime]::UtcNow -lt $deadline)
 
         if (-not $ingestionPassed) {

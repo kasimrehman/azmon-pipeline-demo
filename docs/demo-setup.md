@@ -2,7 +2,7 @@
 
 This page is for the operator preparing the full Azure Monitor pipeline showcase. The customer-facing presentation is in the [12-minute demo guide](demo-guide.md).
 
-The showcase is an additive update to the base deployment. It keeps the VM, network, Arc cluster, extensions, custom location, gateway, workspace, DCE, and public endpoints. It updates the existing DCR and pipeline group, expands `OTelLogs_CL`, and adds `EdgeLogSummary_CL`.
+The showcase is an additive update to the base deployment. It keeps the VM, network, Arc cluster, extensions, custom location, gateway, workspace, DCE, and public endpoints. It updates the existing DCR and pipeline group, expands `OTelLogs_CL`, and adds `RawSyslog_CL` and `EdgeLogSummary_CL`.
 
 ## Prerequisites
 
@@ -10,6 +10,16 @@ The showcase is an additive update to the base deployment. It keeps the VM, netw
 2. Use a workstation whose public IPv4 address is covered by the deployment's `AllowedSourceCidr`.
 3. Install Azure CLI, PowerShell, and Python 3, then authenticate with `az login`.
 4. Confirm the operator can update the resource group, DCR, pipeline group, Log Analytics tables, and invoke VM Run Command.
+5. Ensure the VM hosting K3s is running. Starting a previously deallocated VM does not redeploy or replace the environment:
+
+   ```powershell
+   az vm start `
+       --subscription '<subscription-id>' `
+       --resource-group 'rg-arc-monitor-demo' `
+       --name 'arcmon-k3s'
+   ```
+
+   Allow a few minutes after startup for K3s, Arc extensions, the pipeline pod, and its receiver endpoints to become ready.
 
 ## Install the showcase
 
@@ -24,12 +34,13 @@ Run the one-time setup from the repository root:
 
 The setup performs these operations:
 
-- Creates an 8 GiB static persistent volume and reserves up to 2 GiB for each of three exporter queues, leaving filesystem headroom.
+- Creates an 8 GiB static persistent volume and reserves up to 2 GiB for each of two exporter queues, leaving filesystem headroom.
+- Creates `RawSyslog_CL` for normalized raw Syslog records retained by the showcase.
 - Expands the OTLP table with run, sequence, service, environment, site, trace, duration, and event-class fields.
 - Creates `EdgeLogSummary_CL`.
 - Adds Syslog and OTLP filtering and redaction processors.
 - Adds a one-minute Syslog aggregation branch before raw-event filtering, preserving volume counts without storing every health record.
-- Enables persistent exporter queues.
+- Enables persistent exporter queues for OTLP and the Syslog summary branch. Raw Syslog remains non-persistent because extension `1.7.0` stalls that exporter when persistence is enabled.
 
 The volume uses `hostPath` and advertises `ReadWriteMany`. K3s runs the pipeline collector in a user namespace, so setup makes the dedicated synthetic buffer directory mode `0777`; container root otherwise cannot create queue segments on the host path. This permissive local path is suitable only for this isolated single-node demonstration and must not hold secrets or unrelated data. Use secured, resilient shared storage that genuinely supports `ReadWriteMany` for a production or multi-node design.
 
@@ -48,11 +59,15 @@ Run the full preflight:
 
 The preflight verifies the Azure deployment, pipeline state, table schemas, built-in pipeline metrics, bound persistent volume, inactive outage control, ready receiver endpoints, public TCP reachability, and an end-to-end test run. The ingestion check can take several minutes because it waits for Log Analytics and the one-minute aggregation window.
 
+If the VM is stopped or deallocated, the Azure resources and schemas can still pass while the site runtime and receiver ports are unavailable. The preflight reports the VM power state, prints the exact `az vm start` command, and skips the dependent cluster and TCP checks until the VM is running.
+
 If the pipeline service has no ready endpoints, the check now prints pod status, collector restart details, and the latest collector startup error. A durable-buffer `Permission denied` error means the demo host path was prepared by an older script version; re-run `setup-demo.ps1` to repair its mode and reconcile the existing deployment.
 
 Use `-SkipIngestionTest` only for a quick structural check. Do not treat that reduced check as proof that the demo data path works.
 
 The readiness check proves steady-state ingestion, filtering, redaction, and aggregation. It does not simulate an outage or prove buffered recovery.
+
+The base deployment sends normalized records through `Microsoft-Syslog-FullyFormed` to the standard `Syslog` table. The additive showcase instead uses the custom `RawSyslog_CL` stream and table. This keeps the demo's filtered and redacted raw branch on the same custom logs-ingestion contract as its OTLP and summary branches and avoids a stalled standard-table exporter observed with pipeline extension `1.7.0`. Re-running `setup-demo.ps1` is the recovery procedure: it ensures the custom table exists and reapplies the custom raw stream without recreating the base infrastructure.
 
 ## Rehearse persistent recovery
 
@@ -65,7 +80,7 @@ Run this once after setup and again after changing the pipeline, network, or sto
     -NamePrefix 'arcmon'
 ```
 
-The rehearsal sends a unique continuous run, interrupts the VM's route to the DCE for 60 seconds, restores it in a `finally` block, and waits for Syslog and OTLP records generated before, during, and after the interruption. A pass is evidence that the configured exporter queues drained after that rehearsed outage; it is not a general guarantee of lossless delivery.
+The rehearsal sends a unique continuous run, interrupts the VM's route to the DCE for 60 seconds, restores it in a `finally` block, and waits for records generated before, during, and after the interruption. A pass proves that the persistent OTLP and Syslog summary queues drained without losing their expected records and that non-persistent raw Syslog resumed after restoration. It does not claim lossless raw Syslog delivery or guarantee lossless delivery for other outage conditions.
 
 ## Start presentation traffic
 

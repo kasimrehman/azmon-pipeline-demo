@@ -18,7 +18,7 @@ The point is not merely that logs arrive in Log Analytics. The demo shows that t
 2. **Reduce noise and cost.** Low-value health and debug records are removed before WAN transfer and ingestion.
 3. **Minimize sensitive data.** Synthetic email and token values are redacted at the site rather than after storage.
 4. **Preserve trends without every raw event.** Repeated Syslog records become one-minute counts with useful dimensions.
-5. **Survive a temporary cloud-path failure.** Persistent queues retain outbound records and drain after connectivity returns.
+5. **Survive a temporary cloud-path failure.** Persistent queues retain OTLP records and Syslog summaries, then drain after connectivity returns; raw Syslog resumes after restoration.
 6. **Operate centrally.** Azure manages the pipeline configuration and exposes health metrics even though collection runs outside Azure.
 
 This is a scale-model of a distributed design: the demo deploys one single-node K3s site, while a real organization could apply the pattern to many Arc-enabled locations. Its public raw-protocol endpoints and local `hostPath` storage are demonstration choices, not a production reference architecture.
@@ -35,7 +35,7 @@ This is a scale-model of a distributed design: the demo deploys one single-node 
 
 The audience should leave understanding the boundary: source systems send locally, the pipeline decides what is worth transmitting, and Azure Monitor remains the central analytics and operations destination.
 
-This guide assumes the operator has completed the [demo setup and readiness check](demo-setup.md). The showcase includes continuous Syslog and OTLP traffic, edge filtering and redaction, one-minute aggregation, persistent buffering, and built-in pipeline health metrics.
+This guide assumes the operator has completed the [demo setup and readiness check](demo-setup.md). The showcase includes continuous Syslog and OTLP traffic, edge filtering and redaction, one-minute aggregation, persistent buffering for OTLP and summaries, and built-in pipeline health metrics.
 
 ## Existing deployment or new deployment?
 
@@ -59,7 +59,7 @@ Only use the base deployment steps in the README when the VM, Arc-enabled cluste
 
 Complete this checklist before the audience joins.
 
-1. Confirm the base environment exists, or deploy it by following the [README](../README.md) when starting with an empty resource group.
+1. Confirm the base environment exists and its K3s VM is running, or deploy it by following the [README](../README.md) when starting with an empty resource group. Starting a deallocated VM resumes the existing environment; it does not require redeployment.
 2. Install the additive showcase by following [demo setup and operations](demo-setup.md). Re-run setup after pulling changes to its storage preparation.
 3. Run the full readiness check:
 
@@ -111,7 +111,7 @@ Replace the run ID with the value printed by the generator.
 
 ```kusto
 let RunId = "DEMO-20260919-01";
-Syslog
+RawSyslog_CL
 | where TimeGenerated > ago(30m)
 | where SyslogMessage contains RunId
 | project TimeGenerated, Computer, Facility, SeverityLevel, ProcessName, SyslogMessage
@@ -173,7 +173,7 @@ The summary branch counts the pre-filter Syslog stream, so dropped health detail
 
 ### 3:15-4:45 - Prove both paths end to end
 
-**Show:** Query the `Syslog` and `OTelLogs_CL` tables using the active run ID or exact markers.
+**Show:** Query the `RawSyslog_CL` and `OTelLogs_CL` tables using the active run ID or exact markers.
 
 **Say:** Transport success is not the proof. The proof is that the same identifiers sent at the edge appear in the intended Azure Monitor tables.
 
@@ -204,7 +204,7 @@ The summary branch counts the pre-filter Syslog stream, so dropped health detail
 & .\set-demo-outage.ps1 -Action Restore -SubscriptionId '<subscription-id>' -ResourceGroupName 'rg-arc-monitor-demo' -NamePrefix 'arcmon'
 ```
 
-**Say:** Persistent buffering protects telemetry during a temporary cloud-path interruption and drains it after recovery.
+**Say:** Persistent buffering protects OTLP records and Syslog summaries during a temporary cloud-path interruption and drains them after recovery. The raw Syslog branch is non-persistent and demonstrates resumed flow after restoration.
 
 **Why:** This demonstrates edge resilience, not only steady-state collection.
 

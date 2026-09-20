@@ -51,6 +51,22 @@ resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2024-03-11' 
   properties: {
     dataCollectionEndpointId: dataCollectionEndpointResourceId
     streamDeclarations: {
+      'Custom-RawSyslog': {
+        columns: [
+          {
+            name: 'TimeGenerated'
+            type: 'datetime'
+          }
+          {
+            name: 'Body'
+            type: 'string'
+          }
+          {
+            name: 'SeverityText'
+            type: 'string'
+          }
+        ]
+      }
       'Custom-OTLP': {
         columns: [
           {
@@ -136,13 +152,13 @@ resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2024-03-11' 
     dataFlows: [
       {
         streams: [
-          'Microsoft-Syslog-FullyFormed'
+          'Custom-RawSyslog'
         ]
         destinations: [
           'DemoWorkspace'
         ]
-        transformKql: 'source'
-        outputStream: 'Microsoft-Syslog'
+        transformKql: 'source | project TimeGenerated, CollectorHostName = "", Computer = "", EventTime = TimeGenerated, Facility = "", HostIP = "", HostName = "", ProcessID = toint(""), ProcessName = "", SeverityLevel = SeverityText, SourceSystem = "Azure", SyslogMessage = Body'
+        outputStream: 'Custom-RawSyslog_CL'
       }
       {
         streams: [
@@ -212,10 +228,17 @@ resource pipelineGroup 'Microsoft.Monitor/pipelineGroups@2026-04-01' = {
         name: 'syslog-processor'
       }
       {
+        type: 'Batch'
+        name: 'syslog-export-batch'
+        batch: {
+          timeout: 60000
+        }
+      }
+      {
         type: 'TransformLanguage'
         name: 'syslog-filter-redact'
         transformLanguage: {
-          transformStatement: 'source | where SyslogMessage !contains "event_class=health" and SeverityLevel != "debug" | extend SyslogMessage = replace_string(replace_string(SyslogMessage, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")'
+          transformStatement: 'source | where SyslogMessage !contains "event_class=health" and SeverityLevel != "debug" | extend ProcessID = toint(ProcessID), SyslogMessage = replace_string(replace_string(SyslogMessage, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")'
         }
       }
       {
@@ -239,61 +262,32 @@ resource pipelineGroup 'Microsoft.Monitor/pipelineGroups@2026-04-01' = {
           transformStatement: 'source | where Body !contains "event_class=health" and SeverityText != "DEBUG" | extend Body = replace_string(replace_string(Body, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")'
         }
       }
+      {
+        type: 'Batch'
+        name: 'otlp-export-batch'
+        batch: {
+          timeout: 60000
+        }
+      }
     ]
     exporters: [
       {
         type: 'AzureMonitorWorkspaceLogs'
-        name: 'syslog-exporter'
+        name: 'syslog-exporter-v3'
         azureMonitorWorkspaceLogs: {
           api: {
             dataCollectionEndpointUrl: dataCollectionEndpointLogsIngestionUrl
             dataCollectionRule: dataCollectionRule.properties.immutableId
-            stream: 'Microsoft-Syslog-FullyFormed'
+            stream: 'Custom-RawSyslog'
             schema: {
               recordMap: [
                 {
-                  from: 'attributes.CollectorHostName'
-                  to: 'CollectorHostName'
-                }
-                {
-                  from: 'attributes.Computer'
-                  to: 'Computer'
-                }
-                {
-                  from: 'attributes.EventTime'
-                  to: 'EventTime'
-                }
-                {
-                  from: 'attributes.Facility'
-                  to: 'Facility'
-                }
-                {
-                  from: 'attributes.HostIP'
-                  to: 'HostIP'
-                }
-                {
-                  from: 'attributes.HostName'
-                  to: 'HostName'
-                }
-                {
-                  from: 'attributes.ProcessID'
-                  to: 'ProcessID'
-                }
-                {
-                  from: 'attributes.ProcessName'
-                  to: 'ProcessName'
-                }
-                {
                   from: 'attributes.SeverityLevel'
-                  to: 'SeverityLevel'
-                }
-                {
-                  from: 'attributes.SourceSystem'
-                  to: 'SourceSystem'
+                  to: 'SeverityText'
                 }
                 {
                   from: 'attributes.SyslogMessage'
-                  to: 'SyslogMessage'
+                  to: 'Body'
                 }
                 {
                   from: 'attributes.TimeGenerated'
@@ -301,10 +295,6 @@ resource pipelineGroup 'Microsoft.Monitor/pipelineGroups@2026-04-01' = {
                 }
               ]
             }
-          }
-          persistence: {
-            maxStorageUsage: maxStorageUsage
-            retentionPeriod: retentionPeriod
           }
         }
       }
@@ -421,10 +411,11 @@ resource pipelineGroup 'Microsoft.Monitor/pipelineGroups@2026-04-01' = {
           ]
           processors: [
             'syslog-processor'
+            'syslog-export-batch'
             'syslog-filter-redact'
           ]
           exporters: [
-            'syslog-exporter'
+            'syslog-exporter-v3'
           ]
         }
         {
@@ -449,6 +440,7 @@ resource pipelineGroup 'Microsoft.Monitor/pipelineGroups@2026-04-01' = {
             'otlp-receiver'
           ]
           processors: [
+            'otlp-export-batch'
             'otlp-filter-redact'
           ]
           exporters: [

@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import os
 import signal
 import socket
 import sys
@@ -56,6 +57,7 @@ def parse_args():
     parser.add_argument("--syslog-port", type=int, default=514)
     parser.add_argument("--otlp-port", type=int, default=4317)
     parser.add_argument("--timeout-seconds", type=int, default=10)
+    parser.add_argument("--stop-file")
     return parser.parse_args()
 
 
@@ -183,7 +185,11 @@ def main():
     )
 
     try:
-        while not stop_requested and time.monotonic() < deadline:
+        while (
+            not stop_requested
+            and not (args.stop_file and os.path.exists(args.stop_file))
+            and time.monotonic() < deadline
+        ):
             sequence += 1
             event = event_for(args.run_id, sequence)
             send_syslog(syslog_connection, args, sequence, event)

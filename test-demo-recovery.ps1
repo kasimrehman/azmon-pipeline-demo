@@ -27,6 +27,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$env:AZURE_CORE_COLLECT_TELEMETRY = 'no'
 if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
@@ -38,25 +39,65 @@ $outageScript = Join-Path $PSScriptRoot 'set-demo-outage.ps1'
 $runId = 'RECOVERY-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $senderJob = $null
 $blockAttempted = $false
+$consecutiveQueryFailures = 0
+$stopFilePath = Join-Path ([IO.Path]::GetTempPath()) "azmon-recovery-stop-$([Guid]::NewGuid().ToString('N'))"
 
 function Get-QueryRows {
     param(
         [Parameter(Mandatory)][string] $WorkspaceCustomerId,
-        [Parameter(Mandatory)][string] $Query
+        [Parameter(Mandatory)][string] $Query,
+        [Parameter(Mandatory)][string] $QueryName
     )
 
+    $singleLineQuery = ($Query -replace '\r?\n', ' ').Trim()
     $result = Invoke-DemoAzCli -Arguments @(
         'monitor', 'log-analytics', 'query',
         '--workspace', $WorkspaceCustomerId,
-        '--analytics-query', $Query,
+        '--analytics-query', $singleLineQuery,
         '--timespan', 'PT30M',
         '--output', 'json',
         '--only-show-errors'
     ) -AllowFailure
     if ($result.ExitCode -ne 0) {
+        $script:consecutiveQueryFailures++
+        $details = ConvertTo-DemoSanitizedOutput -Value $result.Output
+        if ($script:consecutiveQueryFailures -ge 3) {
+            throw "$QueryName query failed $script:consecutiveQueryFailures consecutive times: $details"
+        }
+        Write-Warning "$QueryName query failed (attempt $script:consecutiveQueryFailures of 3): $details"
         return @()
     }
+
+    $script:consecutiveQueryFailures = 0
     return @($result.Output | ConvertFrom-Json)
+}
+
+function Wait-SenderSequence {
+    param(
+        [Parameter(Mandatory)][System.Management.Automation.Job] $Job,
+        [Parameter(Mandatory)][int] $MinimumSequence,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        if ($Job.State -in @('Failed', 'Stopped', 'Completed')) {
+            Receive-Job -Job $Job -Keep
+            throw "The telemetry sender stopped before sequence $MinimumSequence. Job state: $($Job.State)."
+        }
+
+        $senderOutput = @(Receive-Job -Job $Job -Keep -ErrorAction SilentlyContinue 6>&1) -join "`n"
+        $sequences = @([regex]::Matches($senderOutput, '"sequence"\s*:\s*([0-9]+)') | ForEach-Object {
+            [int] $_.Groups[1].Value
+        })
+        if ($sequences.Count -gt 0 -and ($sequences | Measure-Object -Maximum).Maximum -ge $MinimumSequence) {
+            return
+        }
+
+        Start-Sleep -Seconds 1
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    throw "Timed out waiting for the telemetry sender to reach sequence $MinimumSequence."
 }
 
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
@@ -91,26 +132,23 @@ $workspaceCustomerId = (Invoke-DemoAzCli -Arguments @(
     '--only-show-errors'
 )).Output
 
-$durationSeconds = 15 + $OutageSeconds + 30
+$durationSeconds = 15 + $OutageSeconds + 300
 $durationMinutes = $durationSeconds / 60.0
 Write-Host "Recovery run ID: $runId"
-Write-Host "Traffic will run for $durationSeconds seconds with a $OutageSeconds-second DCE-path interruption."
+Write-Host "Traffic will continue until 30 seconds after the $OutageSeconds-second DCE-path interruption is restored."
 
 try {
     $senderJob = Start-Job -ScriptBlock {
-        param($ScriptPath, $Endpoint, $DurationMinutes, $EventsPerSecond, $RunId)
+        param($ScriptPath, $Endpoint, $DurationMinutes, $EventsPerSecond, $RunId, $StopFilePath)
         & $ScriptPath `
             -Endpoint $Endpoint `
             -DurationMinutes $DurationMinutes `
             -EventsPerSecond $EventsPerSecond `
-            -RunId $RunId
-    } -ArgumentList $runDemoScript, $endpoint, $durationMinutes, $EventsPerSecond, $runId
+            -RunId $RunId `
+            -StopFilePath $StopFilePath
+    } -ArgumentList $runDemoScript, $endpoint, $durationMinutes, $EventsPerSecond, $runId, $stopFilePath
 
-    Start-Sleep -Seconds 15
-    if ($senderJob.State -in @('Failed', 'Stopped', 'Completed')) {
-        Receive-Job -Job $senderJob
-        throw "The telemetry sender stopped before the outage could be applied. Job state: $($senderJob.State)."
-    }
+    Wait-SenderSequence -Job $senderJob -MinimumSequence ($EventsPerSecond * 10) -TimeoutSeconds 90
 
     Write-Host 'Applying the DCE-path interruption...'
     $blockAttempted = $true
@@ -132,11 +170,32 @@ try {
     $blockAttempted = $false
     $restoredAt = [DateTime]::UtcNow
 
+    Write-Host 'Sending for 30 seconds after restoration...'
+    Start-Sleep -Seconds 30
+    New-Item -ItemType File -Path $stopFilePath -Force | Out-Null
+
     Wait-Job -Job $senderJob | Out-Null
-    Receive-Job -Job $senderJob
+    $senderOutput = @(Receive-Job -Job $senderJob 6>&1)
+    $senderOutput | ForEach-Object { Write-Host $_.ToString() }
     if ($senderJob.State -ne 'Completed') {
         throw "The telemetry sender did not complete successfully. Job state: $($senderJob.State)."
     }
+
+    $completionLine = $senderOutput | ForEach-Object { $_.ToString() } |
+        Where-Object { $_ -match '"status":\s*"(?:completed|stopped)"' } |
+        Select-Object -Last 1
+    if (-not $completionLine) {
+        throw 'The telemetry sender did not return its final event counts.'
+    }
+    $completion = $completionLine | ConvertFrom-Json
+    $expectedSentCount = [int]$completion.counts.syslog
+    if ($expectedSentCount -le 0 -or [int]$completion.counts.otlp -ne $expectedSentCount) {
+        throw "The telemetry sender reported inconsistent final counts: Syslog=$($completion.counts.syslog), OTLP=$($completion.counts.otlp)."
+    }
+    $retainedPatternIndexes = @(2, 4, 6, 8, 9)
+    $expectedRetainedCount = @(0..($expectedSentCount - 1) | Where-Object {
+        ($_ % 10) -in $retainedPatternIndexes
+    }).Count
 }
 finally {
     if ($blockAttempted) {
@@ -153,6 +212,7 @@ finally {
         }
         Remove-Job -Job $senderJob -Force
     }
+    Remove-Item -LiteralPath $stopFilePath -Force -ErrorAction SilentlyContinue
 }
 
 $escapedRunId = $runId.Replace("'", "''")
@@ -162,33 +222,44 @@ $deadline = [DateTime]::UtcNow.AddMinutes($MaxIngestionWaitMinutes)
 $recoveryPassed = $false
 
 do {
-    $syslogRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -Query @"
+    $syslogRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'RawSyslog_CL' -Query @"
 let BlockedAt=datetime($blockedLiteral);
 let RestoredAt=datetime($restoredLiteral);
-Syslog
+RawSyslog_CL
 | where TimeGenerated > ago(30m) and SyslogMessage contains '$escapedRunId'
-| summarize Before=countif(TimeGenerated < BlockedAt), During=countif(TimeGenerated between (BlockedAt .. RestoredAt)), After=countif(TimeGenerated > RestoredAt)
+| summarize Count=count(), Before=countif(TimeGenerated < BlockedAt), During=countif(TimeGenerated between (BlockedAt .. RestoredAt)), After=countif(TimeGenerated > RestoredAt), Leaks=countif(SyslogMessage contains 'demo.user@example.com' or SyslogMessage contains 'demo-token-123'), Health=countif(SyslogMessage contains 'event_class=health'), Redacted=countif(SyslogMessage contains '[REDACTED_')
 "@)
-    $otlpRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -Query @"
+    $otlpRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'OTelLogs_CL' -Query @"
 let BlockedAt=datetime($blockedLiteral);
 let RestoredAt=datetime($restoredLiteral);
 OTelLogs_CL
 | where TimeGenerated > ago(30m) and DemoRunId == '$escapedRunId'
-| summarize Before=countif(TimeGenerated < BlockedAt), During=countif(TimeGenerated between (BlockedAt .. RestoredAt)), After=countif(TimeGenerated > RestoredAt), DistinctSequences=dcount(SequenceNumber)
+| summarize Count=count(), Before=countif(TimeGenerated < BlockedAt), During=countif(TimeGenerated between (BlockedAt .. RestoredAt)), After=countif(TimeGenerated > RestoredAt), DistinctSequences=dcount(SequenceNumber), Leaks=countif(Body contains 'demo.user@example.com' or Body contains 'demo-token-123'), Health=countif(EventClass == 'health'), Redacted=countif(Body contains '[REDACTED_')
+"@)
+    $summaryRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'EdgeLogSummary_CL' -Query @"
+EdgeLogSummary_CL
+| where TimeGenerated > ago(30m) and DemoRunId == '$escapedRunId'
+| summarize Rows=count(), Events=sum(EventCount)
 "@)
 
-    if ($syslogRows.Count -gt 0 -and $otlpRows.Count -gt 0) {
+    if ($syslogRows.Count -gt 0 -and $otlpRows.Count -gt 0 -and $summaryRows.Count -gt 0) {
         $syslog = $syslogRows[0]
         $otlp = $otlpRows[0]
+        $summary = $summaryRows[0]
         $recoveryPassed = (
-            [long]$syslog.Before -gt 0 -and [long]$syslog.During -gt 0 -and [long]$syslog.After -gt 0 -and
+            [long]$syslog.Before -gt 0 -and [long]$syslog.After -gt 0 -and
+            [long]$syslog.Leaks -eq 0 -and [long]$syslog.Health -eq 0 -and
             [long]$otlp.Before -gt 0 -and [long]$otlp.During -gt 0 -and [long]$otlp.After -gt 0 -and
-            [long]$otlp.DistinctSequences -gt 0
+            [long]$otlp.Count -eq $expectedRetainedCount -and [long]$otlp.DistinctSequences -eq $expectedRetainedCount -and
+            [long]$otlp.Leaks -eq 0 -and [long]$otlp.Health -eq 0 -and [long]$otlp.Redacted -eq $expectedRetainedCount -and
+            [long]$summary.Rows -gt 0 -and [long]$summary.Events -eq $expectedSentCount
         )
         if ($recoveryPassed) {
-            Write-Host "[PASS] Persistent recovery: Syslog and OTLP records generated before, during, and after the outage arrived for $runId."
+            Write-Host "[PASS] Persistent recovery: OTLP retained all $expectedRetainedCount filtered records across the outage, the summary retained all $expectedSentCount source events, and raw Syslog resumed after restoration for $runId."
             break
         }
+
+        Write-Host "Observed recovery: Raw before/during/after=$($syslog.Before)/$($syslog.During)/$($syslog.After); OTLP before/during/after=$($otlp.Before)/$($otlp.During)/$($otlp.After), distinct=$($otlp.DistinctSequences)/$expectedRetainedCount; Summary events=$($summary.Events)/$expectedSentCount."
     }
 
     Write-Host 'Waiting for buffered records to drain into Log Analytics...'
@@ -196,5 +267,5 @@ OTelLogs_CL
 } while ([DateTime]::UtcNow -lt $deadline)
 
 if (-not $recoveryPassed) {
-    throw "Recovery run $runId did not show Syslog and OTLP records from all three phases within $MaxIngestionWaitMinutes minute(s)."
+    throw "Recovery run $runId did not prove persistent OTLP and summary recovery plus raw Syslog resumption within $MaxIngestionWaitMinutes minute(s)."
 }

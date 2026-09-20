@@ -176,9 +176,10 @@ Get-AzValue @(
 ) | Out-Null
 
 $volumeCapacityGiB = [int]($PersistentVolumeCapacity -replace 'Gi$', '')
-$aggregateExporterCapacityGiB = $MaxStorageUsageGiB * 3
+$persistentExporterCount = 2
+$aggregateExporterCapacityGiB = $MaxStorageUsageGiB * $persistentExporterCount
 if ($aggregateExporterCapacityGiB -ge $volumeCapacityGiB) {
-    throw "Three exporter queues can use $aggregateExporterCapacityGiB GiB in total. PersistentVolumeCapacity must be larger to leave filesystem headroom."
+    throw "$persistentExporterCount persistent exporter queues can use $aggregateExporterCapacityGiB GiB in total. PersistentVolumeCapacity must be larger to leave filesystem headroom."
 }
 
 Write-Host 'Preparing demo-only persistent storage on the single K3s node...'
@@ -190,6 +191,20 @@ $storageOutput = Invoke-DemoVmShellScript `
     -ScriptArguments @($pipelineNamespace, $persistentVolumeName, $PersistentVolumeCapacity)
 Write-Host $storageOutput
 
+Set-LogAnalyticsTable -WorkspaceResourceId $workspaceResourceId -TableName 'RawSyslog_CL' -Columns @(
+    @{ name = 'TimeGenerated'; type = 'datetime' }
+    @{ name = 'CollectorHostName'; type = 'string' }
+    @{ name = 'Computer'; type = 'string' }
+    @{ name = 'EventTime'; type = 'datetime' }
+    @{ name = 'Facility'; type = 'string' }
+    @{ name = 'HostIP'; type = 'string' }
+    @{ name = 'HostName'; type = 'string' }
+    @{ name = 'ProcessID'; type = 'int' }
+    @{ name = 'ProcessName'; type = 'string' }
+    @{ name = 'SeverityLevel'; type = 'string' }
+    @{ name = 'SourceSystem'; type = 'string' }
+    @{ name = 'SyslogMessage'; type = 'string' }
+)
 Set-LogAnalyticsTable -WorkspaceResourceId $workspaceResourceId -TableName 'OTelLogs_CL' -Columns @(
     @{ name = 'TimeGenerated'; type = 'datetime' }
     @{ name = 'Body'; type = 'string' }

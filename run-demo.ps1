@@ -30,7 +30,11 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string] $PythonCommand = 'py'
+    [string] $PythonCommand = 'py',
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string] $StopFilePath
 )
 
 Set-StrictMode -Version Latest
@@ -92,14 +96,20 @@ Write-Host "Sending $EventsPerSecond events/second to each protocol for $Duratio
 Write-Host 'Press Ctrl+C to stop early; the sender will flush queued OTLP records.'
 Write-Host ''
 
-& $python $emitter `
-    '--endpoint' $Endpoint `
-    '--duration-seconds' $durationSeconds `
-    '--events-per-second' $EventsPerSecond `
-    '--run-id' $RunId `
-    '--syslog-port' $SyslogPort `
-    '--otlp-port' $OtlpPort `
-    '--timeout-seconds' $TimeoutSeconds
+$emitterArguments = @(
+    '--endpoint', $Endpoint,
+    '--duration-seconds', $durationSeconds,
+    '--events-per-second', $EventsPerSecond,
+    '--run-id', $RunId,
+    '--syslog-port', $SyslogPort,
+    '--otlp-port', $OtlpPort,
+    '--timeout-seconds', $TimeoutSeconds
+)
+if ($StopFilePath) {
+    $emitterArguments += @('--stop-file', $StopFilePath)
+}
+
+& $python $emitter @emitterArguments
 
 if ($LASTEXITCODE -ne 0) {
     throw "The demo telemetry emitter exited with code $LASTEXITCODE."

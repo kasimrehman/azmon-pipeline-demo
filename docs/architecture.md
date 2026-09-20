@@ -15,9 +15,9 @@ flowchart LR
     clients[Syslog and OTLP clients]
     gateway[Traefik gateway]
     pipeline[Azure Monitor pipeline<br/>filter, redact, and aggregate]
-    buffer[Persistent exporter queues<br/>demo-only hostPath PV]
+    buffer[Persistent OTLP and summary queues<br/>demo-only hostPath PV]
     ingestion[Data collection endpoint<br/>and data collection rule]
-    logs[Log Analytics<br/>Syslog, OTelLogs_CL,<br/>and EdgeLogSummary_CL]
+    logs[Log Analytics<br/>RawSyslog_CL, OTelLogs_CL,<br/>and EdgeLogSummary_CL]
     azure[Azure and Azure Arc<br/>control plane]
 
     clients -->|source-restricted raw TCP| gateway
@@ -38,7 +38,7 @@ The base configuration demonstrates:
 - Standard Syslog normalization with the `MicrosoftSyslog` processor and explicit OTLP field mapping.
 - Repeatable infrastructure deployment plus marker-based end-to-end ingestion checks.
 
-The additive showcase in `demo/showcase.bicep` keeps the same infrastructure and receiver ports, then updates the DCR and pipeline group in place. It filters low-value health/debug records, redacts fixed synthetic values, preserves richer OTLP context, fans Syslog into a one-minute aggregation path, and enables persistent exporter queues. `setup-demo.ps1` creates the custom summary table and a single-node demo volume before applying that overlay. The pipeline's built-in Azure Monitor metrics provide CPU, memory, uptime, sent-record, and failed-record views; no custom workbook is required.
+The additive showcase in `demo/showcase.bicep` keeps the same infrastructure and receiver ports, then updates the DCR and pipeline group in place. It filters low-value health/debug records, redacts fixed synthetic values, preserves richer OTLP context, fans Syslog into a one-minute aggregation path, and enables persistent queues for OTLP and Syslog summaries. Raw Syslog is non-persistent because extension `1.7.0` stalls that exporter when persistence is enabled. `setup-demo.ps1` creates the custom raw Syslog and summary tables and a single-node demo volume before applying that overlay. The pipeline's built-in Azure Monitor metrics provide CPU, memory, uptime, sent-record, and failed-record views; no custom workbook is required.
 
 The base `monitoring.bicep` remains intentionally straight through. Deploying it again replaces the showcase pipeline configuration, after which `setup-demo.ps1` must be rerun.
 
@@ -64,7 +64,7 @@ flowchart LR
             customLocation[Custom location]
             dce[Data collection endpoint]
             dcr[Data collection rule]
-            law[Log Analytics workspace<br/>Syslog, OTelLogs_CL,<br/>and EdgeLogSummary_CL]
+            law[Log Analytics workspace<br/>RawSyslog_CL, OTelLogs_CL,<br/>and EdgeLogSummary_CL]
             pipelineResource[Azure Monitor<br/>pipeline group]
         end
     end
@@ -74,7 +74,7 @@ flowchart LR
         certManager[Certificate management<br/>issuers and trust bundles]
         controller[Pipeline controller]
         traefik[Traefik TCP gateway<br/>ports 514 and 4317]
-        pipeline[Pipeline collector<br/>filter, redact, aggregate, buffer]
+        pipeline[Pipeline collector<br/>filter, redact, aggregate,<br/>buffer OTLP and summaries]
         persistentVolume[Demo-only persistent volume]
     end
 
@@ -112,13 +112,15 @@ All resources are placed in one dedicated resource group and tagged with `worklo
 | Public IP | `<prefix>-pip` | Provides a static Standard IPv4 address for the two demo endpoints. |
 | Network interface | `<prefix>-nic` | Connects the VM at static private address `10.240.0.10` and associates the public IP. |
 | Virtual machine | `<prefix>-k3s` | Runs Ubuntu 22.04, K3s, Arc agents, extensions, the pipeline, and Traefik. |
-| Log Analytics workspace | `<prefix>-law` | Stores standard Syslog records and custom OTLP records with 30-day retention. |
+| Log Analytics workspace | `<prefix>-law` | Stores the base standard Syslog stream and the showcase custom raw Syslog, OTLP, and summary streams with 30-day retention. |
 | Data collection endpoint | `<prefix>-dce` | Exposes the public Azure Monitor logs-ingestion endpoint used by the pipeline. |
 | Arc-enabled Kubernetes | `<prefix>-k3s` | Azure control-plane representation of the K3s cluster. |
 | Certificate extension | `azure-cert-management` | Creates and rotates the roots, issuers, and trust bundles used by the pipeline. |
 | Pipeline extension | `azure-monitor-pipeline` | Runs the pipeline controller and owns the managed identity used to publish records. |
 | Custom location | `<prefix>-monitor` | Maps Azure resource placement to the Arc cluster, pipeline extension, and `azure-monitor-pipeline` namespace. |
 | Custom table | `OTelLogs_CL` | Stores OTLP log fields `TimeGenerated`, `Body`, and `SeverityText`. |
+| Custom table | `RawSyslog_CL` | Stores normalized raw Syslog fields retained after showcase filtering and redaction. |
+| Custom table | `EdgeLogSummary_CL` | Stores one-minute Syslog event counts before raw-event filtering. |
 | Data collection rule | `<prefix>-pipeline-dcr` | Maps the pipeline streams to the workspace and their destination tables. |
 | Pipeline group | `<prefix>-pipeline` | Declares receivers, processing, exporters, and the two log pipelines scheduled through the custom location. |
 
@@ -230,9 +232,9 @@ The certificate-management extension can create base root CA Secrets before it c
 2. The subnet NSG admits the connection only when its source matches `AllowedSourceCidr`.
 3. The VM public IP and K3s service path deliver the raw TCP stream to Traefik.
 4. Traefik selects the Syslog TCP route and establishes an mTLS connection to `<prefix>-pipeline-service:514`.
-5. The pipeline's Syslog receiver parses the input and the `MicrosoftSyslog` processor produces the fully formed Microsoft Syslog stream.
-6. The exporter maps Syslog attributes to the `Microsoft-Syslog-FullyFormed` schema and posts them to the data collection endpoint.
-7. The DCR maps `Microsoft-Syslog-FullyFormed` to `Microsoft-Syslog`, which lands in the workspace's standard `Syslog` table.
+5. The pipeline's Syslog receiver parses the input and the `MicrosoftSyslog` processor normalizes its fields.
+6. In the base configuration, the exporter maps those attributes to `Microsoft-Syslog-FullyFormed`, and the DCR writes them to the standard `Syslog` table.
+7. The additive showcase filters and redacts the normalized records, maps them to `Custom-RawSyslog`, and writes retained raw records to `RawSyslog_CL`. A parallel pre-filter branch writes one-minute counts to `EdgeLogSummary_CL`.
 
 ### OTLP logs
 
@@ -256,7 +258,7 @@ Both routes share the data collection endpoint, DCR, workspace, pipeline extensi
 
 ## Operations and lifecycle
 
-`validate.ps1` verifies both ARM deployments, Arc connectivity, the exact K3s version, both extensions, the custom location, DCR, pipeline group, custom table, workspace, and TCP reachability of both public endpoints. The sender scripts add unique markers so ingestion can be confirmed independently in the `Syslog` and `OTelLogs_CL` tables.
+`validate.ps1` verifies the base deployments, Arc connectivity, the exact K3s version, both extensions, the custom location, DCR, pipeline group, custom table, workspace, and TCP reachability of both public endpoints. The additive `test-demo-readiness.ps1` verifies showcase markers independently in `RawSyslog_CL`, `OTelLogs_CL`, and `EdgeLogSummary_CL`.
 
 Certificate renewal is handled by cert-manager according to the certificate resource. Extension and chart versions remain operational dependencies: K3s is explicitly pinned, Traefik is explicitly pinned, and the Arc extensions use automatic minor-version upgrades. Because the OTLP path remains in preview and extension behavior can change across versions, version changes should be validated end to end before reuse.
 

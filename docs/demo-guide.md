@@ -276,22 +276,7 @@ This showcase was deployed from Bicep because it uses advanced configuration bey
 
 **Expected telemetry effect:** The same run ID appears through both protocols. After filtering, each raw table retains five events per complete ten-event pattern. OTLP rows also retain sequence, service, site, trace, duration, and event-class fields.
 
-**Pipeline transformation KQL:** Protocol unification starts with separate Syslog and OTLP receivers, not a KQL union. The first row transformations on their raw branches are shown below; they preserve the common run and sequence values while filtering and redacting each protocol's message field.
-
-```kusto
-// syslog-filter-redact
-source
-| where SyslogMessage !contains "event_class=health" and SeverityLevel != "debug"
-| extend ProcessID = toint(ProcessID),
-         SyslogMessage = replace_string(replace_string(SyslogMessage, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")
-```
-
-```kusto
-// otlp-filter-redact
-source
-| where Body !contains "event_class=health" and SeverityText != "DEBUG"
-| extend Body = replace_string(replace_string(Body, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")
-```
+**Pipeline transformation KQL:** None. Protocol unification is implemented by configuring separate Syslog and OTLP receivers in the same pipeline group and routing their dataflows to Azure Monitor exporters. It is not implemented by a KQL `union`. The later filtering and redaction transformations belong to Features 2 and 3.
 
 **Concrete before and after:** Sequence 3 is a retained informational transaction on both inputs. Timestamps and the deterministic trace ID vary with the run.
 
@@ -343,21 +328,18 @@ OTelLogs_CL
 
 **Expected telemetry effect:** Five of every ten generated events are health/debug records and must be absent from both raw tables. Each raw table therefore retains five events per complete ten-event pattern, with zero retained health or debug records.
 
-**Pipeline transformation KQL:** Filtering and redaction share one processor on each raw branch. The `where` clauses are the part responsible for this feature.
+**Pipeline transformation KQL:** Filtering and redaction share one processor on each raw branch, but only these `where` clauses implement noise reduction. These are the relevant excerpts from the deployed transformations.
 
 ```kusto
-// syslog-filter-redact
+// Syslog filter
 source
 | where SyslogMessage !contains "event_class=health" and SeverityLevel != "debug"
-| extend ProcessID = toint(ProcessID),
-         SyslogMessage = replace_string(replace_string(SyslogMessage, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")
 ```
 
 ```kusto
-// otlp-filter-redact
+// OTLP filter
 source
 | where Body !contains "event_class=health" and SeverityText != "DEBUG"
-| extend Body = replace_string(replace_string(Body, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")
 ```
 
 **Concrete before and after:** Sequence 1 is generated as `event_class=health` with `DEBUG` severity. The Syslog message contains `sequence=1 ... event_class=health severity=DEBUG`, and the equivalent OTLP record has `SequenceNumber=1`, `EventClass=health`, and `SeverityText=DEBUG`. After processing, there is no sequence-1 row in either raw destination. The Syslog summary branch runs before this filter, so sequence 1 still contributes to a `SeverityLevel=debug` summary count.
@@ -402,20 +384,17 @@ union
 
 **Expected telemetry effect:** No retained row contains either original synthetic value. Every retained row contains both redaction markers, so each marker count equals the retained count in each raw table.
 
-**Pipeline transformation KQL:** The nested `replace_string` calls are the part responsible for this feature. They run at the edge after each raw branch removes health/debug records.
+**Pipeline transformation KQL:** Only the nested `replace_string` calls implement data minimization. These are the relevant excerpts from the deployed transformations; in the complete processors, they run after the Feature 2 filters.
 
 ```kusto
-// syslog-filter-redact
+// Syslog redaction
 source
-| where SyslogMessage !contains "event_class=health" and SeverityLevel != "debug"
-| extend ProcessID = toint(ProcessID),
-         SyslogMessage = replace_string(replace_string(SyslogMessage, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")
+| extend SyslogMessage = replace_string(replace_string(SyslogMessage, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")
 ```
 
 ```kusto
-// otlp-filter-redact
+// OTLP redaction
 source
-| where Body !contains "event_class=health" and SeverityText != "DEBUG"
 | extend Body = replace_string(replace_string(Body, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")
 ```
 
@@ -540,7 +519,20 @@ EdgeLogSummary_CL
 
 **Expected telemetry effect:** During a temporary DCE-path interruption, OTLP records and Syslog summaries queue locally and drain after restoration. The recovery run must retain every expected filtered OTLP sequence and every summarized Syslog source event. Raw Syslog is not lossless during the interruption; it must resume after restoration.
 
-**Pipeline transformation KQL:** There is no additional KQL statement for persistence. The durable queues are exporter settings applied after the existing OTLP raw and Syslog summary transformations shown in Features 3 and 4. KQL determines the queued record content; persistent storage determines whether those records survive the interruption.
+**Pipeline transformation KQL:** None. Persistence is implemented by exporter queue and persistent-volume settings, not by a row transformation. Those settings determine whether already-processed OTLP records and Syslog summaries survive an interruption.
+
+**How the recovery demo runs:** Use `test-demo-recovery.ps1` as a separate, self-contained demo instead of running `run-demo.ps1` yourself. Do not start either script in another terminal. The recovery script starts `run-demo.ps1` internally as a PowerShell background job, so telemetry generation continues while the same recovery script applies and removes the outage.
+
+With the defaults, the script performs these phases in order:
+
+| Phase | Default duration | What the script does |
+| --- | ---: | --- |
+| Establish baseline | About 10 seconds at 2 events/second | Starts one correlated Syslog-and-OTLP run and waits until the sender reaches sequence 20. |
+| Simulate non-reachability | 60 seconds | Resolves the DCE hostname to its current IPv4 addresses and adds `/32` blackhole routes for those addresses on the K3s VM. Inbound Syslog/514 and OTLP/4317 remain reachable, so records continue entering the pipeline while its DCE export path is unavailable. |
+| Restore and prove live flow | 30 seconds | Removes the recorded blackhole routes and keeps the same sender running so queues can drain and raw Syslog can demonstrate post-restoration flow. |
+| Verify | Up to 15 minutes | Stops the sender, then polls Log Analytics every 20 seconds for complete durable OTLP sequence coverage, complete Syslog summary counts, and raw Syslog records before and after the outage. |
+
+`-OutageSeconds` controls only the blackhole interval and defaults to `60`; accepted values are 15 through 300 seconds. `-MaxIngestionWaitMinutes` controls only the final Log Analytics polling window and defaults to `15`. The outage is narrow but not process-specific: another destination sharing one of the DCE's resolved IP addresses could also be temporarily affected from this VM.
 
 **Concrete before and after:** The outage changes delivery timing, not the durable table schemas or record content.
 
@@ -552,17 +544,28 @@ EdgeLogSummary_CL
 
 `TimeGenerated` remains the event or bucket time, so an individual durable row does not carry an explicit “was queued” flag. Exact sequence coverage and summary totals from the recovery harness are the evidence that delayed records drained. The raw branch is verified only for resumed post-restoration flow.
 
-**How and where to check:** Run the complete recovery harness rather than manually issuing separate block and restore commands:
+**How and where to check:** Stop any normal `run-demo.ps1` run first, then run this one recovery command in a single terminal:
 
 ```powershell
 & .\test-demo-recovery.ps1 `
    -SubscriptionId '<subscription-id>' `
    -ResourceGroupName 'rg-arc-monitor-demo' `
    -NamePrefix 'arcmon' `
+   -OutageSeconds 60 `
    -EventsPerSecond 2
 ```
 
-The script restores the route in a `finally` block and queries Log Analytics until it can test all phases. Its success line is the primary evidence:
+Do not run `set-demo-outage.ps1` separately during this test. `test-demo-recovery.ps1` calls that helper with `-Action Block` and `-Action Restore` at the correct times. It also restores the routes in a `finally` block if the test throws an error. If PowerShell or the machine is forcibly terminated before cleanup runs, restore the path manually before continuing:
+
+```powershell
+& .\set-demo-outage.ps1 `
+   -Action Restore `
+   -SubscriptionId '<subscription-id>' `
+   -ResourceGroupName 'rg-arc-monitor-demo' `
+   -NamePrefix 'arcmon'
+```
+
+After restoration, the recovery script queries Log Analytics until all phases can be tested or the ingestion wait expires. Its success line is the primary evidence:
 
 ```text
 [PASS] Persistent recovery: OTLP retained all <retained> filtered records across the outage, the summary retained all <sent> source events, and raw Syslog resumed after restoration for <run-id>.
@@ -592,7 +595,7 @@ EdgeLogSummary_CL
 
 **Expected telemetry effect:** The Azure-managed definition controls what the remote pipeline receives, processes, and exports. During steady traffic, exported log records increase while failed-export records remain at zero. During the rehearsed outage, failed or retried export activity may appear before returning to normal. CPU, memory, and uptime should have current data.
 
-**Pipeline transformation KQL:** There is no additional KQL statement for central management. Azure deploys and reconciles the three pipeline transformations shown in Features 1 through 4; placement through the custom location and collection of runtime metrics are control-plane behavior, not row transformations.
+**Pipeline transformation KQL:** None. Placement through the custom location, centralized configuration, reconciliation, and runtime metrics are control-plane behavior. Azure centrally manages the row transformations documented in Features 2 through 4, but no KQL statement implements central management itself.
 
 **Concrete before and after:** This feature adds no further data-row transformation. Its before/after is a control-plane-to-runtime result:
 

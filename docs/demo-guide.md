@@ -29,11 +29,11 @@ This is a scale-model of a distributed design: the demo deploys one single-node 
 flowchart LR
    workstation[Telemetry-sending workstation<br/>Syslog TCP/514 and OTLP gRPC/4317]
 
-   pipelineResource[Azure Monitor pipeline resource<br/>azmon-pipeline]
-   customLocation[Azure custom location<br/>azmon-monitor<br/>Deployed resource: azmon-pipeline]
+   azMon[Azure Monitor Pipeline<br/>az-mon<br/>Deployed resource: azmon-pipeline]
+   customLocation[Azure Custom Location<br/>azmon-monitor]
 
-   subgraph cluster[Arc-enabled Kubernetes cluster]
-      pipeline[Azure Monitor pipeline<br/>Receive Syslog and OTLP<br/>Filter and redact raw branches<br/>Aggregate Syslog summary branch<br/>Buffer durable branches<br/>Export custom streams]
+   subgraph cluster[Arc-enabled Kubernetes cluster<br/>azmon-k3s]
+      pipeline[Pipeline runtime<br/>Receive Syslog and OTLP<br/>Filter and redact raw branches<br/>Aggregate Syslog summary branch<br/>Buffer durable branches<br/>Export custom streams]
    end
 
    dce[Data collection endpoint<br/>Azure ingestion endpoint]
@@ -47,8 +47,8 @@ flowchart LR
 
    workstation -->|Syslog and OTLP| pipeline
    pipeline -->|Processed streams<br/>DCE URL and DCR ID| dce
-   customLocation -.->|Contains deployed resource| pipelineResource
-   customLocation -.->|Backed by Arc cluster and<br/>pipeline controller extension| pipeline
+   azMon -.->|Deployed to via<br/>extendedLocation| customLocation
+   customLocation -.->|Backed by Arc host via<br/>hostResourceId| cluster
    dce -->|Ingest Custom-RawSyslog| raw
    dce -->|Ingest Custom-OTLP| otlp
    dce -->|Ingest Custom-EdgeLogSummary| summary
@@ -72,7 +72,7 @@ For this existing Bicep deployment, prove the association entirely in the Azure 
 4. On the custom location overview, identify `azmon-k3s` as the connected cluster and `azure-monitor-pipeline` as the supporting cluster extension.
 5. Optionally open the Arc-enabled Kubernetes resource `azmon-k3s`, select **Extensions**, and verify that `azure-monitor-pipeline` is installed.
 
-This gives the visible placement chain `azmon-monitor` → `azmon-pipeline`, backed by `azmon-k3s` and the `azure-monitor-pipeline` extension. The solid arrows in the diagram are telemetry flow; the placement and DCR dotted arrows describe control-plane relationships. The DCR is not part of the placement chain and does not contain a cluster reference.
+The diagram's control-plane chain is `az-mon` → `azmon-monitor` → `azmon-k3s`: the pipeline's `extendedLocation` targets the custom location, and the custom location's `hostResourceId` targets the Arc-enabled Kubernetes cluster. In this deployment, the `az-mon` diagram object is the portal resource `azmon-pipeline`, which appears under the custom location's deployed resources. The cluster hosts the `azure-monitor-pipeline` extension. The solid arrows in the diagram are telemetry flow; the placement and DCR dotted arrows describe control-plane relationships. The DCR is not part of the placement chain and does not contain a cluster reference.
 
 ## Real-world scenario map
 
@@ -175,7 +175,35 @@ The normal command output contains status and counters, not every event body. `-
 
 Here, **retained** means that an event survives the pipeline filter and is stored as one unaggregated row in its raw destination table. It does not mean unchanged: retained rows are redacted before export. A filtered event is not retained in `RawSyslog_CL` or `OTelLogs_CL`, but the Syslog event is still represented numerically in the pre-filter summary branch. One summary row can represent many source messages, so the number of `EdgeLogSummary_CL` rows is not expected to equal the number sent.
 
-The generator repeats a ten-event pattern. Five health/debug events are filtered and five transaction/warning/error events are retained. Each retained event contains both synthetic sensitive values, so both redaction-marker counts should equal the retained count. **Ingestion settles** when pipeline batches and any queued exports have drained and the Log Analytics queries return the expected totals. The readiness and recovery scripts calculate exact expectations from the final sender counts.
+The generator repeats the following ten-position event pattern. One position is one logical event, and the sender emits that event once as Syslog and once as OTLP. Therefore, one complete pattern produces **10 Syslog messages plus 10 OTLP records**, not ten records total. Pattern position is `((SequenceNumber - 1) % 10) + 1`, so sequence 11 behaves like position 1.
+
+| Pattern position | Event class | Severity | Raw Syslog sent to LAW? | OTLP sent to LAW? | Syslog summary sent to LAW? | Retained or filtered because |
+| ---: | --- | --- | --- | --- | --- | --- |
+| 1 | `health` | `DEBUG` / `debug` | No | No | Yes, counted in an aggregate | Raw branches filter health and debug records; summary runs before that filter |
+| 2 | `health` | `DEBUG` / `debug` | No | No | Yes, counted in an aggregate | Raw branches filter health and debug records; summary runs before that filter |
+| 3 | `transaction` | `INFO` / `informational` | Yes, one row | Yes, one row | Yes, counted in an aggregate | Retained because it is neither health nor debug; sensitive values are redacted |
+| 4 | `health` | `DEBUG` / `debug` | No | No | Yes, counted in an aggregate | Raw branches filter health and debug records; summary runs before that filter |
+| 5 | `transaction` | `INFO` / `informational` | Yes, one row | Yes, one row | Yes, counted in an aggregate | Retained because it is neither health nor debug; sensitive values are redacted |
+| 6 | `health` | `DEBUG` / `debug` | No | No | Yes, counted in an aggregate | Raw branches filter health and debug records; summary runs before that filter |
+| 7 | `transaction` | `INFO` / `informational` | Yes, one row | Yes, one row | Yes, counted in an aggregate | Retained because it is neither health nor debug; sensitive values are redacted |
+| 8 | `health` | `DEBUG` / `debug` | No | No | Yes, counted in an aggregate | Raw branches filter health and debug records; summary runs before that filter |
+| 9 | `warning` | `WARNING` / `warning` | Yes, one row | Yes, one row | Yes, counted in an aggregate | Retained because it is neither health nor debug; sensitive values are redacted |
+| 10 | `error` | `ERROR` / `error` | Yes, one row | Yes, one row | Yes, counted in an aggregate | Retained because it is neither health nor debug; sensitive values are redacted |
+
+`LAW` means the Log Analytics workspace. A **Yes, one row** entry is an individually stored record in `RawSyslog_CL` or `OTelLogs_CL`. A **Yes, counted in an aggregate** entry contributes to `EdgeLogSummary_CL.EventCount`; it does not necessarily create its own summary row.
+
+The standard command uses `-EventsPerSecond 5` and the default `-DurationMinutes 10`. The rate is five logical positions per second **for each protocol**, because every loop sends both formats.
+
+| Standard-run quantity | Value |
+| --- | ---: |
+| Time for one complete ten-position pattern | 2 seconds |
+| Complete patterns per minute | 30 |
+| Complete patterns in 10 minutes | 300 |
+| Source records sent | 3,000 Syslog + 3,000 OTLP = 6,000 protocol records |
+| Individual raw rows expected in LAW after filtering | 1,500 `RawSyslog_CL` + 1,500 `OTelLogs_CL` |
+| Syslog source events represented by summaries | 3,000 in `sum(EdgeLogSummary_CL.EventCount)` |
+
+For a rate $r$ and duration $m$ minutes, one pattern takes $10/r$ seconds and the planned number of patterns is $60mr/10$. Timing and an early Ctrl+C can affect the final partial pattern, so use the sender's final JSON counters as the exact result. Each complete pattern has five filtered health/debug positions and five retained transaction/warning/error positions. Each retained event contains both synthetic sensitive values, so both redaction-marker counts should equal the retained count. **Ingestion settles** when pipeline batches and any queued exports have drained and the Log Analytics queries return the expected totals.
 
 ## Log Analytics table schemas
 
@@ -248,6 +276,23 @@ This showcase was deployed from Bicep because it uses advanced configuration bey
 
 **Expected telemetry effect:** The same run ID appears through both protocols. After filtering, each raw table retains five events per complete ten-event pattern. OTLP rows also retain sequence, service, site, trace, duration, and event-class fields.
 
+**Pipeline transformation KQL:** Protocol unification starts with separate Syslog and OTLP receivers, not a KQL union. The first row transformations on their raw branches are shown below; they preserve the common run and sequence values while filtering and redacting each protocol's message field.
+
+```kusto
+// syslog-filter-redact
+source
+| where SyslogMessage !contains "event_class=health" and SeverityLevel != "debug"
+| extend ProcessID = toint(ProcessID),
+         SyslogMessage = replace_string(replace_string(SyslogMessage, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")
+```
+
+```kusto
+// otlp-filter-redact
+source
+| where Body !contains "event_class=health" and SeverityText != "DEBUG"
+| extend Body = replace_string(replace_string(Body, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")
+```
+
 **Concrete before and after:** Sequence 3 is a retained informational transaction on both inputs. Timestamps and the deterministic trace ID vary with the run.
 
 | Stage | Representative record |
@@ -298,6 +343,23 @@ OTelLogs_CL
 
 **Expected telemetry effect:** Five of every ten generated events are health/debug records and must be absent from both raw tables. Each raw table therefore retains five events per complete ten-event pattern, with zero retained health or debug records.
 
+**Pipeline transformation KQL:** Filtering and redaction share one processor on each raw branch. The `where` clauses are the part responsible for this feature.
+
+```kusto
+// syslog-filter-redact
+source
+| where SyslogMessage !contains "event_class=health" and SeverityLevel != "debug"
+| extend ProcessID = toint(ProcessID),
+         SyslogMessage = replace_string(replace_string(SyslogMessage, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")
+```
+
+```kusto
+// otlp-filter-redact
+source
+| where Body !contains "event_class=health" and SeverityText != "DEBUG"
+| extend Body = replace_string(replace_string(Body, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")
+```
+
 **Concrete before and after:** Sequence 1 is generated as `event_class=health` with `DEBUG` severity. The Syslog message contains `sequence=1 ... event_class=health severity=DEBUG`, and the equivalent OTLP record has `SequenceNumber=1`, `EventClass=health`, and `SeverityText=DEBUG`. After processing, there is no sequence-1 row in either raw destination. The Syslog summary branch runs before this filter, so sequence 1 still contributes to a `SeverityLevel=debug` summary count.
 
 | Source pattern | Raw Syslog result | OTLP result | Syslog summary result |
@@ -339,6 +401,23 @@ union
 **Where the feature is set up:** Keep **Azure Monitor** > **Pipelines** > `<prefix>-pipeline` > **Dataflows** open. In the raw Syslog and OTLP transformation editors, show the `replace_string` expressions that replace `demo.user@example.com` and `demo-token-123` with `[REDACTED_EMAIL]` and `[REDACTED_TOKEN]`.
 
 **Expected telemetry effect:** No retained row contains either original synthetic value. Every retained row contains both redaction markers, so each marker count equals the retained count in each raw table.
+
+**Pipeline transformation KQL:** The nested `replace_string` calls are the part responsible for this feature. They run at the edge after each raw branch removes health/debug records.
+
+```kusto
+// syslog-filter-redact
+source
+| where SyslogMessage !contains "event_class=health" and SeverityLevel != "debug"
+| extend ProcessID = toint(ProcessID),
+         SyslogMessage = replace_string(replace_string(SyslogMessage, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")
+```
+
+```kusto
+// otlp-filter-redact
+source
+| where Body !contains "event_class=health" and SeverityText != "DEBUG"
+| extend Body = replace_string(replace_string(Body, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")
+```
 
 **Concrete before and after:** The source sample and stored sequence-3 records make the transformation visible without exposing real sensitive data.
 
@@ -403,6 +482,17 @@ union
 
 **Expected telemetry effect:** Summary rows represent all Syslog source events, including health/debug events removed from `RawSyslog_CL`. `sum(EventCount)` equals the final Syslog sent count while the raw table retains five events per complete ten-event pattern. Per complete pattern, the summaries represent five debug, three informational, one warning, and one error event.
 
+**Pipeline transformation KQL:** This processor is on the parallel Syslog summary branch before the raw branch's filter.
+
+```kusto
+// syslog-summary
+source
+| extend DemoRunId = extract("run_id=([^ ]+)", 1, SyslogMessage),
+         Site = extract("site=([^ ]+)", 1, SyslogMessage),
+         TimeGenerated = bin(TimeGenerated, 1m)
+| summarize EventCount=count() by TimeGenerated, DemoRunId, Site, SeverityLevel
+```
+
 **Concrete before and after:** If one complete ten-event pattern falls within one clock minute, the source has ten separate Syslog messages. The raw branch stores only sequences 3, 5, 7, 9, and 10. The summary branch stores rows like these instead of message bodies:
 
 | `TimeGenerated` minute | `DemoRunId` | `Site` | `SeverityLevel` | `EventCount` |
@@ -449,6 +539,8 @@ EdgeLogSummary_CL
 **Where the feature is set up:** In **Azure Monitor** > **Pipelines** > `<prefix>-pipeline` > **Dataflows**, identify the two durable branches by their destinations: `OTelLogs_CL` and `EdgeLogSummary_CL`. Persistent-volume and per-exporter queue settings are advanced Bicep configuration and aren't exposed by the current guided portal UI, so use the recovery harness as the live proof. State the boundary clearly: `RawSyslog_CL` is intentionally nonpersistent because extension `1.7.0` stalls that exporter when persistence is enabled.
 
 **Expected telemetry effect:** During a temporary DCE-path interruption, OTLP records and Syslog summaries queue locally and drain after restoration. The recovery run must retain every expected filtered OTLP sequence and every summarized Syslog source event. Raw Syslog is not lossless during the interruption; it must resume after restoration.
+
+**Pipeline transformation KQL:** There is no additional KQL statement for persistence. The durable queues are exporter settings applied after the existing OTLP raw and Syslog summary transformations shown in Features 3 and 4. KQL determines the queued record content; persistent storage determines whether those records survive the interruption.
 
 **Concrete before and after:** The outage changes delivery timing, not the durable table schemas or record content.
 
@@ -499,6 +591,8 @@ EdgeLogSummary_CL
 **Where the feature is set up:** In the Azure portal, open **Azure Monitor** > **Pipelines** > `<prefix>-pipeline`. Use **Dataflows** to show the centrally managed Syslog, OTLP, and summary paths. Then select **Monitoring** > **Metrics** to show that Azure monitors the pipeline running on the Arc-enabled cluster.
 
 **Expected telemetry effect:** The Azure-managed definition controls what the remote pipeline receives, processes, and exports. During steady traffic, exported log records increase while failed-export records remain at zero. During the rehearsed outage, failed or retried export activity may appear before returning to normal. CPU, memory, and uptime should have current data.
+
+**Pipeline transformation KQL:** There is no additional KQL statement for central management. Azure deploys and reconciles the three pipeline transformations shown in Features 1 through 4; placement through the custom location and collection of runtime metrics are control-plane behavior, not row transformations.
 
 **Concrete before and after:** This feature adds no further data-row transformation. Its before/after is a control-plane-to-runtime result:
 

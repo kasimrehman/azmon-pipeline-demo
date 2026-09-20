@@ -521,6 +521,45 @@ EdgeLogSummary_CL
 
 **Pipeline transformation KQL:** None. Persistence is implemented by exporter queue and persistent-volume settings, not by a row transformation. Those settings determine whether already-processed OTLP records and Syslog summaries survive an interruption.
 
+**Data flow during the recovery demo:** The sender continues sending into the cluster throughout the test. The simulated outage affects only the outbound hop from the K3s VM to the DCE.
+
+```mermaid
+flowchart LR
+   sender[Demo sender<br/>presenter workstation]
+   publicIp[Cluster public IP<br/>Syslog 514 and OTLP 4317]
+
+   subgraph k3s[Arc-enabled K3s cluster]
+      pipeline[Receivers and processors]
+      durable[OTLP and summary exporters<br/>persistent queues on cluster PV]
+      raw[Raw Syslog exporter<br/>nonpersistent]
+      route[K3s VM route to DCE IPs<br/>normal: forward<br/>outage: blackhole]
+   end
+
+   dce[Data Collection Endpoint]
+   law[DCR and Log Analytics tables]
+   harness[test-demo-recovery.ps1]
+
+   sender -->|continuous Syslog and OTLP| publicIp --> pipeline
+   pipeline --> durable
+   pipeline --> raw
+   durable -->|normal: drains promptly<br/>after restore: retries backlog| route
+   raw -->|best effort| route
+   route -->|available before and after outage| dce --> law
+   harness -.->|Block: add DCE IPv4 /32<br/>blackhole routes for 60 seconds| route
+   harness -.->|Restore: remove<br/>recorded routes| route
+```
+
+The durable branches use the cluster volume as an exporter queue, not as a permanent copy of all telemetry. During healthy delivery, queued items are sent promptly and removed after successful export. During the outage, undelivered OTLP records and Syslog summaries remain in their local queues, subject to the configured 2 GiB per-exporter limit and 120-minute retention period, and retry after the route is restored. `RawSyslog_CL` follows the nonpersistent branch, so raw records produced during the outage can be lost.
+
+**How the blackhole routes are added:** `test-demo-recovery.ps1` calls `set-demo-outage.ps1 -Action Block`. That helper reads the deployed DCE logs-ingestion endpoint, extracts its hostname, and uses Azure VM Run Command to execute `demo/control-demo-outage.sh` with elevated permissions on the K3s VM. The shell script resolves the hostname's current IPv4 addresses and adds one exact host route for each address:
+
+```bash
+getent ahostsv4 "$dce_hostname" | awk '{print $1}' | sort -u
+ip route add blackhole "$address/32" metric 42760
+```
+
+A Linux `blackhole` route discards outbound packets matching that destination. Because each route is a `/32`, it overrides the VM's normal route only for that resolved DCE address. The script does not change the Azure NSG, disconnect the VM, alter DNS, or close inbound Syslog/514 and OTLP/4317. It records every added address in `/var/lib/azure-monitor-pipeline-demo/blocked-dce-routes`; restore reads that file and removes the routes with `ip route del blackhole "$address/32" metric 42760`. Only IPv4 addresses resolved when the block begins are covered, and another destination sharing one of those addresses can also be affected.
+
 **How the recovery demo runs:** Use `test-demo-recovery.ps1` as a separate, self-contained demo instead of running `run-demo.ps1` yourself. Do not start either script in another terminal. The recovery script starts `run-demo.ps1` internally as a PowerShell background job, so telemetry generation continues while the same recovery script applies and removes the outage.
 
 With the defaults, the script performs these phases in order:

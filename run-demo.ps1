@@ -64,7 +64,7 @@ foreach ($port in @($SyslogPort, $OtlpPort)) {
     try {
         $connectTask = $client.ConnectAsync($Endpoint, $port)
         if (-not $connectTask.Wait([TimeSpan]::FromSeconds($TimeoutSeconds)) -or -not $client.Connected) {
-            throw "Timed out connecting to ${Endpoint}:$port. Confirm this client's public IP is allowed by the NSG."
+            throw "Timed out connecting to ${Endpoint}:$port. Confirm this client's public IP is allowed by the NSG. If the VM was just started, wait 2-5 minutes for K3s and the TCP listeners to become ready, then retry."
         }
     }
     finally {

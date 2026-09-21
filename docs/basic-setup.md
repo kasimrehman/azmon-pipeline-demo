@@ -55,7 +55,7 @@ Alternatively, invoke phase 1 directly from this directory:
     -SshPublicKeyPath "$HOME\.ssh\id_ed25519.pub"
 ```
 
-The Cidr is needed for you to be able to send monitoring data to the public endpoint. Find out your Cidr with
+The Cidr is needed for you to be able to send monitoring data to the public endpoint from your workstation (simulating an edge device). Find out your Cidr with
 
 ```powershell
 (Invoke-RestMethod 'https://api.ipify.org') + '/32'

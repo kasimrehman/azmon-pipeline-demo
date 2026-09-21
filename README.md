@@ -287,12 +287,84 @@ This showcase was deployed from Bicep because it uses advanced configuration bey
 
 **Concrete before and after:** Sequence 3 is a retained informational transaction on both inputs. Timestamps and the deterministic trace ID vary with the run.
 
-| Stage | Representative record |
-| --- | --- |
-| Syslog before the pipeline | `<14>1 <timestamp> demo-sender arc-monitor-demo 3 DEMO - run_id=DEMO-20260919-01 sequence=3 site=edge-01 environment=demo event_class=transaction severity=INFO duration_ms=131 trace_id=<trace-id> email=demo.user@example.com token=demo-token-123` |
-| `RawSyslog_CL` after processing | `TimeGenerated=<timestamp>`, `SeverityLevel=informational`, `SourceSystem=Azure`, `SyslogMessage=...run_id=DEMO-20260919-01 sequence=3...email=[REDACTED_EMAIL] token=[REDACTED_TOKEN]` |
-| OTLP before the pipeline | Body `run_id=DEMO-20260919-01 sequence=3 event_class=transaction email=demo.user@example.com token=demo-token-123`; attributes include `DemoRunId`, `SequenceNumber=3`, `ServiceName=checkout-api`, `Site=edge-01`, `TraceId`, `DurationMs=131`, and `EventClass=transaction` |
-| `OTelLogs_CL` after processing | The same mapped attributes occupy typed columns; `SeverityText=INFO` and the stored `Body` contains both redaction markers |
+The blocks below reformat the records for readability. Field names are on the left and values are quoted on the right. The actual Syslog event is transmitted as one line.
+
+**Syslog before the pipeline**
+
+```text
+Syslog envelope
+   priority/version : "<14>1"
+   timestamp        : "<timestamp>"
+   hostname         : "demo-sender"
+   application      : "arc-monitor-demo"
+   process ID       : "3"
+   message ID       : "DEMO"
+
+Message fields
+   run_id           : "DEMO-20260919-01"
+   sequence         : "3"
+   site             : "edge-01"
+   environment      : "demo"
+   event_class      : "transaction"
+   severity         : "INFO"
+   duration_ms      : "131"
+   trace_id         : "<trace-id>"
+   email            : "demo.user@example.com"
+   token            : "demo-token-123"
+```
+
+**`RawSyslog_CL` after processing**
+
+```text
+TimeGenerated      : "<timestamp>"
+SeverityLevel      : "informational"
+SourceSystem       : "Azure"
+SyslogMessage
+   run_id           : "DEMO-20260919-01"
+   sequence         : "3"
+   email            : "[REDACTED_EMAIL]"
+   token            : "[REDACTED_TOKEN]"
+```
+
+**OTLP before the pipeline**
+
+```text
+Body
+   run_id           : "DEMO-20260919-01"
+   sequence         : "3"
+   event_class      : "transaction"
+   email            : "demo.user@example.com"
+   token            : "demo-token-123"
+
+Attributes
+   DemoRunId        : "DEMO-20260919-01"
+   SequenceNumber   : 3
+   ServiceName      : "checkout-api"
+   Site             : "edge-01"
+   TraceId          : "<trace-id>"
+   DurationMs       : 131
+   EventClass       : "transaction"
+```
+
+**`OTelLogs_CL` after processing**
+
+```text
+TimeGenerated      : "<timestamp>"
+DemoRunId          : "DEMO-20260919-01"
+SequenceNumber     : 3
+SeverityText       : "INFO"
+EventClass         : "transaction"
+ServiceName        : "checkout-api"
+Site               : "edge-01"
+TraceId            : "<trace-id>"
+DurationMs         : 131
+Body
+   run_id           : "DEMO-20260919-01"
+   sequence         : "3"
+   event_class      : "transaction"
+   email            : "[REDACTED_EMAIL]"
+   token            : "[REDACTED_TOKEN]"
+```
 
 This is a schema conversion as well as a transport demonstration: the Syslog wire format becomes a Syslog-shaped custom row, while OTLP structured attributes become dedicated custom columns.
 

@@ -88,6 +88,13 @@ The audience should leave understanding the boundary: source systems send locall
 
 This guide assumes the operator has completed the [demo setup and readiness check](docs/demo-setup.md). The showcase includes continuous Syslog and OTLP traffic, edge filtering and redaction, one-minute aggregation, persistent buffering for OTLP and summaries, and built-in pipeline health metrics.
 
+## How to deploy
+
+Deployment has two stages:
+
+1. Follow [basic setup](docs/basic-setup.md) to deploy the Azure infrastructure, Arc-enabled K3s cluster, Azure Monitor pipeline, Log Analytics resources, and secure Syslog and OTLP gateway. This stage is required for a new environment and can be skipped when those base resources already exist.
+2. Follow [demo setup and operations](docs/demo-setup.md) to add the showcase tables, transformations, persistent queues, traffic generator, and readiness checks. This additive stage turns the base deployment into the complete demonstration described on this page.
+
 ## Existing deployment or new deployment?
 
 You do not need to start over when the repository's base infrastructure is already deployed. Do not rerun `deploy.ps1` or `complete-deployment.ps1` merely to add the showcase. Run the additive setup against the existing resource group and prefix, then run readiness:
@@ -104,7 +111,7 @@ You do not need to start over when the repository's base infrastructure is alrea
    -NamePrefix '<existing-prefix>'
 ```
 
-Only use the base deployment steps in the README when the VM, Arc-enabled cluster, workspace, DCE, pipeline group, and gateway do not already exist.
+Only use the [basic setup](docs/basic-setup.md) deployment steps when the VM, Arc-enabled cluster, workspace, DCE, pipeline group, and gateway do not already exist.
 
 ## Presenter preparation
 

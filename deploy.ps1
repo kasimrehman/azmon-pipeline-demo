@@ -34,7 +34,10 @@ param(
 
     [Parameter()]
     [ValidatePattern('^v1\.[0-9]+\.[0-9]+\+k3s[0-9]+$')]
-    [string] $K3sVersion = 'v1.33.3+k3s1'
+    [string] $K3sVersion = 'v1.33.3+k3s1',
+
+    [Parameter()]
+    [string] $ConfigFile
 )
 
 Set-StrictMode -Version Latest
@@ -44,6 +47,11 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
 }
 
 $scriptRoot = $PSScriptRoot
+$configHelper = Join-Path $scriptRoot 'demo\demo-config.ps1'
+. $configHelper
+$configPath = Resolve-DemoConfigurationPath `
+    -Path $ConfigFile `
+    -DefaultDirectory $scriptRoot
 $infraTemplate = Join-Path $scriptRoot 'infra.bicep'
 $monitoringTemplate = Join-Path $scriptRoot 'monitoring.bicep'
 $bootstrapScript = Join-Path $scriptRoot 'bootstrap-k3s.sh'
@@ -418,6 +426,13 @@ $workspaceResourceId = $infraOutputs.workspaceResourceId.value
 $workspaceCustomerId = $infraOutputs.workspaceCustomerId.value
 $dataCollectionEndpointResourceId = $infraOutputs.dataCollectionEndpointResourceId.value
 $dataCollectionEndpointLogsIngestionUrl = $infraOutputs.dataCollectionEndpointLogsIngestionUrl.value
+Write-DemoConfiguration `
+    -Path $configPath `
+    -SubscriptionId $SubscriptionId `
+    -ResourceGroupName $ResourceGroupName `
+    -NamePrefix $NamePrefix `
+    -Endpoint $publicIpAddress
+Write-DeploymentStatus "Saved local demo configuration to '$configPath'."
 $clusterName = $vmName
 $resourceGroupScope = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName"
 $arcClusterResourceId = "$resourceGroupScope/providers/Microsoft.Kubernetes/connectedClusters/$clusterName"
@@ -673,4 +688,9 @@ Write-Host ''
 Write-Host 'Phase 1 complete.'
 Write-Host "In Azure Portal, open resource group '$ResourceGroupName' and wait for deployment '$monitoringDeploymentName' to show Succeeded."
 Write-Host 'Then run:'
-Write-Host "  & .\complete-deployment.ps1 -SubscriptionId '$SubscriptionId' -ResourceGroupName '$ResourceGroupName' -NamePrefix '$NamePrefix'"
+if ($PSBoundParameters.ContainsKey('ConfigFile')) {
+    Write-Host "  & .\complete-deployment.ps1 -ConfigFile '$configPath'"
+}
+else {
+    Write-Host '  & .\complete-deployment.ps1'
+}

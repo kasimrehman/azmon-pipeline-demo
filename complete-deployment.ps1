@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
+    [Parameter()]
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
     [string] $SubscriptionId,
 
@@ -10,7 +10,10 @@ param(
 
     [Parameter()]
     [ValidatePattern('^[a-z0-9]{3,12}$')]
-    [string] $NamePrefix = 'arcmon'
+    [string] $NamePrefix = 'arcmon',
+
+    [Parameter()]
+    [string] $ConfigFile
 )
 
 Set-StrictMode -Version Latest
@@ -18,6 +21,19 @@ $ErrorActionPreference = 'Stop'
 if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
+
+$configHelper = Join-Path $PSScriptRoot 'demo\demo-config.ps1'
+. $configHelper
+$configState = Get-DemoConfiguration `
+    -Path $ConfigFile `
+    -DefaultDirectory $PSScriptRoot `
+    -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
+$SubscriptionId = Resolve-DemoConfigurationValue -Name 'SubscriptionId' -BoundParameters $PSBoundParameters -CurrentValue $SubscriptionId -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+$ResourceGroupName = Resolve-DemoConfigurationValue -Name 'ResourceGroupName' -BoundParameters $PSBoundParameters -CurrentValue $ResourceGroupName -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+$NamePrefix = Resolve-DemoConfigurationValue -Name 'NamePrefix' -BoundParameters $PSBoundParameters -CurrentValue $NamePrefix -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+Assert-DemoConfigurationValue -Name 'SubscriptionId' -Value $SubscriptionId
+Assert-DemoConfigurationValue -Name 'ResourceGroupName' -Value $ResourceGroupName
+Assert-DemoConfigurationValue -Name 'NamePrefix' -Value $NamePrefix
 
 $gatewayScript = Join-Path $PSScriptRoot 'configure-gateway.sh'
 $monitoringDeploymentName = "$NamePrefix-monitoring"
@@ -111,5 +127,11 @@ Write-Host "Syslog endpoint: ${publicIpAddress}:514"
 Write-Host "OTLP endpoint:   ${publicIpAddress}:4317"
 Write-Host ''
 Write-Host 'Run the demos from this directory:'
-Write-Host "  & .\send-syslog-demo.ps1 -Endpoint '$publicIpAddress'"
-Write-Host "  & .\send-otlp-demo.ps1 -Endpoint '$publicIpAddress'"
+if ($PSBoundParameters.ContainsKey('ConfigFile')) {
+    Write-Host "  & .\send-syslog-demo.ps1 -ConfigFile '$($configState.Path)'"
+    Write-Host "  & .\send-otlp-demo.ps1 -ConfigFile '$($configState.Path)'"
+}
+else {
+    Write-Host '  & .\send-syslog-demo.ps1'
+    Write-Host '  & .\send-otlp-demo.ps1'
+}

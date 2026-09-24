@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
+    [Parameter()]
     [ValidateNotNullOrEmpty()]
     [string] $Endpoint,
 
@@ -14,11 +14,22 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string] $PythonCommand = 'py'
+    [string] $PythonCommand = 'py',
+
+    [Parameter()]
+    [string] $ConfigFile
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+. (Join-Path $PSScriptRoot 'demo\demo-config.ps1')
+$configState = Get-DemoConfiguration `
+    -Path $ConfigFile `
+    -DefaultDirectory $PSScriptRoot `
+    -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
+$Endpoint = Resolve-DemoConfigurationValue -Name 'Endpoint' -BoundParameters $PSBoundParameters -CurrentValue $Endpoint -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+Assert-DemoConfigurationValue -Name 'Endpoint' -Value $Endpoint
 
 if (-not (Get-Command $PythonCommand -ErrorAction SilentlyContinue)) {
     throw "Python command '$PythonCommand' was not found. Install Python 3 or pass -PythonCommand with its executable path."

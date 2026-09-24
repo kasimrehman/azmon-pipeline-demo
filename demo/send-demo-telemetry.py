@@ -9,13 +9,6 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from opentelemetry import _logs
-from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
-from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
-from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
-from opentelemetry.sdk.resources import Resource
-
-
 EVENT_PATTERN = (
     ("health", "DEBUG", logging.DEBUG, 7),
     ("health", "DEBUG", logging.DEBUG, 7),
@@ -32,17 +25,6 @@ EVENT_PATTERN = (
 stop_requested = False
 
 
-class CheckedOTLPLogExporter(OTLPLogExporter):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.export_results = []
-
-    def export(self, batch):
-        result = super().export(batch)
-        self.export_results.append(result)
-        return result
-
-
 def request_stop(_signum, _frame):
     global stop_requested
     stop_requested = True
@@ -54,6 +36,11 @@ def parse_args():
     parser.add_argument("--duration-seconds", type=float, required=True)
     parser.add_argument("--events-per-second", type=int, required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument(
+        "--protocol",
+        choices=("syslog", "otlp", "both"),
+        default="both",
+    )
     parser.add_argument("--syslog-port", type=int, default=514)
     parser.add_argument("--otlp-port", type=int, default=4317)
     parser.add_argument("--timeout-seconds", type=int, default=10)
@@ -75,6 +62,22 @@ def connect_syslog(args):
 
 
 def create_otlp_logger(args):
+    from opentelemetry import _logs
+    from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+    from opentelemetry.sdk.resources import Resource
+
+    class CheckedOTLPLogExporter(OTLPLogExporter):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.export_results = []
+
+        def export(self, batch):
+            result = super().export(batch)
+            self.export_results.append(result)
+            return result
+
     provider = LoggerProvider(
         resource=Resource.create({"service.name": "arc-monitor-showcase"})
     )
@@ -181,8 +184,12 @@ def main():
         "error": 0,
     }
 
-    syslog_connection = connect_syslog(args)
-    logger, provider, exporter = create_otlp_logger(args)
+    syslog_enabled = args.protocol in ("syslog", "both")
+    otlp_enabled = args.protocol in ("otlp", "both")
+    syslog_connection = connect_syslog(args) if syslog_enabled else None
+    logger = provider = exporter = None
+    if otlp_enabled:
+        logger, provider, exporter = create_otlp_logger(args)
     sequence = 0
 
     print(
@@ -191,6 +198,7 @@ def main():
                 "status": "started",
                 "runId": args.run_id,
                 "endpoint": args.endpoint,
+                "protocol": args.protocol,
                 "eventsPerSecondPerProtocol": args.events_per_second,
                 "startedUtc": started_at,
             }
@@ -206,26 +214,32 @@ def main():
         ):
             sequence += 1
             event = event_for(args.run_id, sequence)
-            syslog_message = send_syslog(syslog_connection, args, sequence, event)
-            counts["syslog"] += 1
-            otlp_body, otlp_attributes = send_otlp(logger, args, sequence, event)
-            counts["otlp"] += 1
+            syslog_message = None
+            otlp_body = otlp_attributes = None
+            if syslog_enabled:
+                syslog_message = send_syslog(
+                    syslog_connection, args, sequence, event
+                )
+                counts["syslog"] += 1
+            if otlp_enabled:
+                otlp_body, otlp_attributes = send_otlp(
+                    logger, args, sequence, event
+                )
+                counts["otlp"] += 1
             counts[event[0]] += 1
 
             if args.show_payload_sample and sequence == 3:
-                print(
-                    json.dumps(
-                        {
-                            "status": "source-sample",
-                            "note": "Exact payload sent before edge processing; synthetic values only.",
-                            "sequence": sequence,
-                            "syslogWireMessage": syslog_message.rstrip("\n"),
-                            "otlpBody": otlp_body,
-                            "otlpAttributes": otlp_attributes,
-                        }
-                    ),
-                    flush=True,
-                )
+                sample = {
+                    "status": "source-sample",
+                    "note": "Exact payload sent before edge processing; synthetic values only.",
+                    "sequence": sequence,
+                }
+                if syslog_enabled:
+                    sample["syslogWireMessage"] = syslog_message.rstrip("\n")
+                if otlp_enabled:
+                    sample["otlpBody"] = otlp_body
+                    sample["otlpAttributes"] = otlp_attributes
+                print(json.dumps(sample), flush=True)
 
             if sequence % max(args.events_per_second * 10, 1) == 0:
                 print(
@@ -247,25 +261,32 @@ def main():
             if delay > 0:
                 time.sleep(delay)
     finally:
-        syslog_connection.close()
-        flushed = provider.force_flush(timeout_millis=args.timeout_seconds * 1000)
-        provider.shutdown()
-        export_succeeded = bool(exporter.export_results) and all(
-            getattr(result, "name", "") == "SUCCESS"
-            for result in exporter.export_results
-        )
+        if syslog_connection is not None:
+            syslog_connection.close()
+        flushed = None
+        export_succeeded = None
+        if provider is not None:
+            flushed = provider.force_flush(
+                timeout_millis=args.timeout_seconds * 1000
+            )
+            provider.shutdown()
+            export_succeeded = bool(exporter.export_results) and all(
+                getattr(result, "name", "") == "SUCCESS"
+                for result in exporter.export_results
+            )
 
     summary = {
         "status": "stopped" if stop_requested else "completed",
         "runId": args.run_id,
+        "protocol": args.protocol,
         "startedUtc": started_at,
         "stoppedUtc": utc_now(),
-        "otlpFlushSucceeded": bool(flushed),
+        "otlpFlushSucceeded": bool(flushed) if otlp_enabled else None,
         "otlpExportSucceeded": export_succeeded,
         "counts": counts,
     }
     print(json.dumps(summary), flush=True)
-    return 0 if flushed and export_succeeded else 2
+    return 0 if not otlp_enabled or (flushed and export_succeeded) else 2
 
 
 if __name__ == "__main__":

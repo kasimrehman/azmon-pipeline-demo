@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+[CmdletBinding()]
 param(
     [Parameter()]
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
@@ -9,7 +9,8 @@ param(
     [string] $ResourceGroupName = 'rg-arc-monitor-demo',
 
     [Parameter()]
-    [switch] $Force,
+    [ValidatePattern('^[a-z0-9]{3,12}$')]
+    [string] $NamePrefix = 'arcmon',
 
     [Parameter()]
     [string] $ConfigFile
@@ -17,52 +18,41 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 . (Join-Path $PSScriptRoot 'demo\demo-config.ps1')
+
 $configState = Get-DemoConfiguration `
     -Path $ConfigFile `
     -DefaultDirectory $PSScriptRoot `
     -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
 $SubscriptionId = Resolve-DemoConfigurationValue -Name 'SubscriptionId' -BoundParameters $PSBoundParameters -CurrentValue $SubscriptionId -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
 $ResourceGroupName = Resolve-DemoConfigurationValue -Name 'ResourceGroupName' -BoundParameters $PSBoundParameters -CurrentValue $ResourceGroupName -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+$NamePrefix = Resolve-DemoConfigurationValue -Name 'NamePrefix' -BoundParameters $PSBoundParameters -CurrentValue $NamePrefix -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
 Assert-DemoConfigurationValue -Name 'SubscriptionId' -Value $SubscriptionId
 Assert-DemoConfigurationValue -Name 'ResourceGroupName' -Value $ResourceGroupName
+Assert-DemoConfigurationValue -Name 'NamePrefix' -Value $NamePrefix
 
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
     throw 'Azure CLI is required and was not found on PATH.'
 }
 
-$workloadTag = @(& az group show `
+$output = @(& az network public-ip show `
     --subscription $SubscriptionId `
-    --name $ResourceGroupName `
-    --query 'tags.workload' `
+    --resource-group $ResourceGroupName `
+    --name "$NamePrefix-pip" `
+    --query ipAddress `
     --output tsv `
     --only-show-errors 2>&1)
 if ($LASTEXITCODE -ne 0) {
-    throw "Resource group '$ResourceGroupName' was not found or could not be read."
-}
-if (($workloadTag -join [Environment]::NewLine).Trim() -ne 'azure-monitor-pipeline-demo') {
-    throw "Refusing to delete '$ResourceGroupName' because it is not marked as a standalone monitor demo."
+    throw (($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine)
 }
 
-if (-not $Force -and -not $WhatIfPreference) {
-    $caption = 'Delete standalone Azure Monitor demo'
-    $question = "Delete resource group '$ResourceGroupName' and every resource in it?"
-    if (-not $PSCmdlet.ShouldContinue($question, $caption)) {
-        return
-    }
+$endpoint = (($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine).Trim()
+if ([string]::IsNullOrWhiteSpace($endpoint)) {
+    throw "Public IP '$NamePrefix-pip' did not return an IP address."
 }
 
-if ($PSCmdlet.ShouldProcess($ResourceGroupName, 'Delete the resource group and every resource in it')) {
-    & az group delete `
-        --subscription $SubscriptionId `
-        --name $ResourceGroupName `
-        --yes `
-        --no-wait `
-        --only-show-errors
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to start deletion of resource group '$ResourceGroupName'."
-    }
-
-    Write-Host "Deletion started for resource group '$ResourceGroupName'."
-}
+Write-Output $endpoint

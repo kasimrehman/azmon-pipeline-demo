@@ -1,6 +1,7 @@
 .azure/
 .vscode/
 deploy.local.ps1
+demo.config.psd1
 infra.json
 monitoring.json
 *.log

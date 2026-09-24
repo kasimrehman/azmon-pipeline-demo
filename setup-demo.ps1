@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
+    [Parameter()]
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
     [string] $SubscriptionId,
 
@@ -22,7 +22,10 @@ param(
 
     [Parameter()]
     [ValidateRange(1, 2880)]
-    [int] $RetentionPeriodMinutes = 120
+    [int] $RetentionPeriodMinutes = 120,
+
+    [Parameter()]
+    [string] $ConfigFile
 )
 
 Set-StrictMode -Version Latest
@@ -32,6 +35,18 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
 }
 
 . (Join-Path $PSScriptRoot 'demo\demo-common.ps1')
+. (Join-Path $PSScriptRoot 'demo\demo-config.ps1')
+
+$configState = Get-DemoConfiguration `
+    -Path $ConfigFile `
+    -DefaultDirectory $PSScriptRoot `
+    -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
+$SubscriptionId = Resolve-DemoConfigurationValue -Name 'SubscriptionId' -BoundParameters $PSBoundParameters -CurrentValue $SubscriptionId -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+$ResourceGroupName = Resolve-DemoConfigurationValue -Name 'ResourceGroupName' -BoundParameters $PSBoundParameters -CurrentValue $ResourceGroupName -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+$NamePrefix = Resolve-DemoConfigurationValue -Name 'NamePrefix' -BoundParameters $PSBoundParameters -CurrentValue $NamePrefix -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+Assert-DemoConfigurationValue -Name 'SubscriptionId' -Value $SubscriptionId
+Assert-DemoConfigurationValue -Name 'ResourceGroupName' -Value $ResourceGroupName
+Assert-DemoConfigurationValue -Name 'NamePrefix' -Value $NamePrefix
 
 $showcaseTemplate = Join-Path $PSScriptRoot 'demo\showcase.bicep'
 $storageScript = Join-Path $PSScriptRoot 'demo\prepare-demo-storage.sh'
@@ -191,20 +206,6 @@ $storageOutput = Invoke-DemoVmShellScript `
     -ScriptArguments @($pipelineNamespace, $persistentVolumeName, $PersistentVolumeCapacity)
 Write-Host $storageOutput
 
-Set-LogAnalyticsTable -WorkspaceResourceId $workspaceResourceId -TableName 'RawSyslog_CL' -Columns @(
-    @{ name = 'TimeGenerated'; type = 'datetime' }
-    @{ name = 'CollectorHostName'; type = 'string' }
-    @{ name = 'Computer'; type = 'string' }
-    @{ name = 'EventTime'; type = 'datetime' }
-    @{ name = 'Facility'; type = 'string' }
-    @{ name = 'HostIP'; type = 'string' }
-    @{ name = 'HostName'; type = 'string' }
-    @{ name = 'ProcessID'; type = 'int' }
-    @{ name = 'ProcessName'; type = 'string' }
-    @{ name = 'SeverityLevel'; type = 'string' }
-    @{ name = 'SourceSystem'; type = 'string' }
-    @{ name = 'SyslogMessage'; type = 'string' }
-)
 Set-LogAnalyticsTable -WorkspaceResourceId $workspaceResourceId -TableName 'OTelLogs_CL' -Columns @(
     @{ name = 'TimeGenerated'; type = 'datetime' }
     @{ name = 'Body'; type = 'string' }
@@ -259,5 +260,11 @@ $endpoint = Get-AzValue @(
 Write-Host ''
 Write-Host 'Full showcase configuration deployed.'
 Write-Host 'The pipeline controller may need several minutes to reconcile the update.'
-Write-Host "Run readiness: & .\test-demo-readiness.ps1 -SubscriptionId '$SubscriptionId' -ResourceGroupName '$ResourceGroupName' -NamePrefix '$NamePrefix'"
-Write-Host "Start traffic:  & .\run-demo.ps1 -Endpoint '$endpoint' -RunId 'DEMO-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))'"
+if ($PSBoundParameters.ContainsKey('ConfigFile')) {
+    Write-Host "Run readiness: & .\test-demo-readiness.ps1 -ConfigFile '$($configState.Path)'"
+    Write-Host "Start traffic:  & .\run-demo.ps1 -ConfigFile '$($configState.Path)' -DurationMinutes 2 -EventsPerSecond 5 -RunId 'DEMO-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))'"
+}
+else {
+    Write-Host 'Run readiness: & .\test-demo-readiness.ps1'
+    Write-Host "Start traffic:  & .\run-demo.ps1 -DurationMinutes 2 -EventsPerSecond 5 -RunId 'DEMO-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))'"
+}

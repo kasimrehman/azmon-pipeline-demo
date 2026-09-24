@@ -51,22 +51,6 @@ resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2024-03-11' 
   properties: {
     dataCollectionEndpointId: dataCollectionEndpointResourceId
     streamDeclarations: {
-      'Custom-RawSyslog': {
-        columns: [
-          {
-            name: 'TimeGenerated'
-            type: 'datetime'
-          }
-          {
-            name: 'Body'
-            type: 'string'
-          }
-          {
-            name: 'SeverityText'
-            type: 'string'
-          }
-        ]
-      }
       'Custom-OTLP': {
         columns: [
           {
@@ -152,13 +136,13 @@ resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2024-03-11' 
     dataFlows: [
       {
         streams: [
-          'Custom-RawSyslog'
+          'Microsoft-Syslog-FullyFormed'
         ]
         destinations: [
           'DemoWorkspace'
         ]
-        transformKql: 'source | project TimeGenerated, CollectorHostName = "", Computer = "", EventTime = TimeGenerated, Facility = "", HostIP = "", HostName = "", ProcessID = toint(""), ProcessName = "", SeverityLevel = SeverityText, SourceSystem = "Azure", SyslogMessage = Body'
-        outputStream: 'Custom-RawSyslog_CL'
+        transformKql: 'source'
+        outputStream: 'Microsoft-Syslog'
       }
       {
         streams: [
@@ -228,17 +212,10 @@ resource pipelineGroup 'Microsoft.Monitor/pipelineGroups@2026-04-01' = {
         name: 'syslog-processor'
       }
       {
-        type: 'Batch'
-        name: 'syslog-export-batch'
-        batch: {
-          timeout: 60000
-        }
-      }
-      {
         type: 'TransformLanguage'
         name: 'syslog-filter-redact'
         transformLanguage: {
-          transformStatement: 'source | where SyslogMessage !contains "event_class=health" and SeverityLevel != "debug" | extend ProcessID = toint(ProcessID), SyslogMessage = replace_string(replace_string(SyslogMessage, "demo.user@example.com", "[REDACTED_EMAIL]"), "demo-token-123", "[REDACTED_TOKEN]")'
+          transformStatement: 'source | where SyslogMessage !contains \'event_class=health\' and SeverityLevel != \'debug\' | extend SyslogMessage = replace_string(replace_string(SyslogMessage, \'demo.user@example.com\', \'[REDACTED_EMAIL]\'), \'demo-token-123\', \'[REDACTED_TOKEN]\')'
         }
       }
       {
@@ -278,20 +255,56 @@ resource pipelineGroup 'Microsoft.Monitor/pipelineGroups@2026-04-01' = {
           api: {
             dataCollectionEndpointUrl: dataCollectionEndpointLogsIngestionUrl
             dataCollectionRule: dataCollectionRule.properties.immutableId
-            stream: 'Custom-RawSyslog'
+            stream: 'Microsoft-Syslog-FullyFormed'
             schema: {
               recordMap: [
                 {
+                  from: 'attributes.TimeGenerated'
+                  to: 'TimeGenerated'
+                }
+                {
+                  from: 'attributes.CollectorHostName'
+                  to: 'CollectorHostName'
+                }
+                {
+                  from: 'attributes.Computer'
+                  to: 'Computer'
+                }
+                {
+                  from: 'attributes.EventTime'
+                  to: 'EventTime'
+                }
+                {
+                  from: 'attributes.Facility'
+                  to: 'Facility'
+                }
+                {
+                  from: 'attributes.HostIP'
+                  to: 'HostIP'
+                }
+                {
+                  from: 'attributes.HostName'
+                  to: 'HostName'
+                }
+                {
+                  from: 'attributes.ProcessID'
+                  to: 'ProcessID'
+                }
+                {
+                  from: 'attributes.ProcessName'
+                  to: 'ProcessName'
+                }
+                {
                   from: 'attributes.SeverityLevel'
-                  to: 'SeverityText'
+                  to: 'SeverityLevel'
+                }
+                {
+                  from: 'attributes.SourceSystem'
+                  to: 'SourceSystem'
                 }
                 {
                   from: 'attributes.SyslogMessage'
-                  to: 'Body'
-                }
-                {
-                  from: 'attributes.TimeGenerated'
-                  to: 'TimeGenerated'
+                  to: 'SyslogMessage'
                 }
               ]
             }
@@ -411,7 +424,6 @@ resource pipelineGroup 'Microsoft.Monitor/pipelineGroups@2026-04-01' = {
           ]
           processors: [
             'syslog-processor'
-            'syslog-export-batch'
             'syslog-filter-redact'
           ]
           exporters: [

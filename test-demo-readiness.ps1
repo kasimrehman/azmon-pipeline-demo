@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
+    [Parameter()]
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
     [string] $SubscriptionId,
 
@@ -17,7 +17,14 @@ param(
     [int] $MaxIngestionWaitMinutes = 15,
 
     [Parameter()]
-    [switch] $SkipIngestionTest
+    [ValidateSet('Syslog', 'OTLP', 'Both')]
+    [string] $Protocol = 'Both',
+
+    [Parameter()]
+    [switch] $SkipIngestionTest,
+
+    [Parameter()]
+    [string] $ConfigFile
 )
 
 Set-StrictMode -Version Latest
@@ -27,12 +34,26 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
 }
 
 . (Join-Path $PSScriptRoot 'demo\demo-common.ps1')
+. (Join-Path $PSScriptRoot 'demo\demo-config.ps1')
+
+$configState = Get-DemoConfiguration `
+    -Path $ConfigFile `
+    -DefaultDirectory $PSScriptRoot `
+    -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
+$SubscriptionId = Resolve-DemoConfigurationValue -Name 'SubscriptionId' -BoundParameters $PSBoundParameters -CurrentValue $SubscriptionId -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+$ResourceGroupName = Resolve-DemoConfigurationValue -Name 'ResourceGroupName' -BoundParameters $PSBoundParameters -CurrentValue $ResourceGroupName -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+$NamePrefix = Resolve-DemoConfigurationValue -Name 'NamePrefix' -BoundParameters $PSBoundParameters -CurrentValue $NamePrefix -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+Assert-DemoConfigurationValue -Name 'SubscriptionId' -Value $SubscriptionId
+Assert-DemoConfigurationValue -Name 'ResourceGroupName' -Value $ResourceGroupName
+Assert-DemoConfigurationValue -Name 'NamePrefix' -Value $NamePrefix
 
 $failures = [Collections.Generic.List[string]]::new()
 $pipelineName = "$NamePrefix-pipeline"
 $workspaceName = "$NamePrefix-law"
 $vmName = "$NamePrefix-k3s"
 $persistentVolumeName = 'azure-monitor-pipeline-demo-pv'
+$syslogEnabled = $Protocol -in @('Syslog', 'Both')
+$otlpEnabled = $Protocol -in @('OTLP', 'Both')
 
 function Add-CheckResult {
     param(
@@ -59,7 +80,14 @@ function Get-TableColumns {
         'rest', '--method', 'get', '--uri', $uri,
         '--output', 'json', '--only-show-errors'
     )).Output | ConvertFrom-Json
-    return @($json.properties.schema.columns | ForEach-Object { $_.name })
+    $schema = $json.properties.schema
+    $columnProperty = @('columns', 'standardColumns') |
+        Where-Object { $null -ne $schema.PSObject.Properties[$_] } |
+        Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($columnProperty)) {
+        throw "Table '$TableName' metadata did not include a supported column collection."
+    }
+    return @($schema.$columnProperty | ForEach-Object { $_.name })
 }
 
 function Get-QueryRows {
@@ -88,11 +116,11 @@ function Get-QueryRows {
 
 function Get-QueryValue {
     param(
-        [Parameter(Mandatory)][object[]] $Rows,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]] $Rows,
         [Parameter(Mandatory)][string] $Name
     )
 
-    if ($Rows.Count -eq 0) {
+    if ($null -eq $Rows -or $Rows.Count -eq 0) {
         return 0L
     }
     $property = $Rows[0].PSObject.Properties[$Name]
@@ -146,32 +174,36 @@ $workspaceJson = (Invoke-DemoAzCli -Arguments @(
 $workspaceResourceId = $workspaceJson.id
 $workspaceCustomerId = $workspaceJson.customerId
 
-$rawSyslogRequired = @(
-    'TimeGenerated', 'CollectorHostName', 'Computer', 'EventTime', 'Facility', 'HostIP',
-    'HostName', 'ProcessID', 'ProcessName', 'SeverityLevel', 'SourceSystem', 'SyslogMessage'
-)
-$rawSyslogColumns = Get-TableColumns -WorkspaceResourceId $workspaceResourceId -TableName 'RawSyslog_CL'
-$rawSyslogMissing = @($rawSyslogRequired | Where-Object { $_ -notin $rawSyslogColumns })
-Add-CheckResult 'Raw Syslog table schema' ($rawSyslogMissing.Count -eq 0) $(
-    if ($rawSyslogMissing.Count -eq 0) { 'all showcase columns present' } else { "missing $($rawSyslogMissing -join ', ')" }
-)
+if ($syslogEnabled) {
+    $rawSyslogRequired = @(
+        'TimeGenerated', 'CollectorHostName', 'Computer', 'EventTime', 'Facility', 'HostIP',
+        'HostName', 'ProcessID', 'ProcessName', 'SeverityLevel', 'SourceSystem', 'SyslogMessage'
+    )
+    $rawSyslogColumns = Get-TableColumns -WorkspaceResourceId $workspaceResourceId -TableName 'Syslog'
+    $rawSyslogMissing = @($rawSyslogRequired | Where-Object { $_ -notin $rawSyslogColumns })
+    Add-CheckResult 'Syslog table schema' ($rawSyslogMissing.Count -eq 0) $(
+        if ($rawSyslogMissing.Count -eq 0) { 'all showcase columns present' } else { "missing $($rawSyslogMissing -join ', ')" }
+    )
 
-$otlpRequired = @(
-    'TimeGenerated', 'Body', 'SeverityText', 'DemoRunId', 'SequenceNumber',
-    'ServiceName', 'DeploymentEnvironment', 'Site', 'TraceId', 'DurationMs', 'EventClass'
-)
-$otlpColumns = Get-TableColumns -WorkspaceResourceId $workspaceResourceId -TableName 'OTelLogs_CL'
-$otlpMissing = @($otlpRequired | Where-Object { $_ -notin $otlpColumns })
-Add-CheckResult 'OTLP table schema' ($otlpMissing.Count -eq 0) $(
-    if ($otlpMissing.Count -eq 0) { 'all showcase columns present' } else { "missing $($otlpMissing -join ', ')" }
-)
+    $summaryRequired = @('TimeGenerated', 'DemoRunId', 'Site', 'SeverityLevel', 'EventCount')
+    $summaryColumns = Get-TableColumns -WorkspaceResourceId $workspaceResourceId -TableName 'EdgeLogSummary_CL'
+    $summaryMissing = @($summaryRequired | Where-Object { $_ -notin $summaryColumns })
+    Add-CheckResult 'Summary table schema' ($summaryMissing.Count -eq 0) $(
+        if ($summaryMissing.Count -eq 0) { 'all showcase columns present' } else { "missing $($summaryMissing -join ', ')" }
+    )
+}
 
-$summaryRequired = @('TimeGenerated', 'DemoRunId', 'Site', 'SeverityLevel', 'EventCount')
-$summaryColumns = Get-TableColumns -WorkspaceResourceId $workspaceResourceId -TableName 'EdgeLogSummary_CL'
-$summaryMissing = @($summaryRequired | Where-Object { $_ -notin $summaryColumns })
-Add-CheckResult 'Summary table schema' ($summaryMissing.Count -eq 0) $(
-    if ($summaryMissing.Count -eq 0) { 'all showcase columns present' } else { "missing $($summaryMissing -join ', ')" }
-)
+if ($otlpEnabled) {
+    $otlpRequired = @(
+        'TimeGenerated', 'Body', 'SeverityText', 'DemoRunId', 'SequenceNumber',
+        'ServiceName', 'DeploymentEnvironment', 'Site', 'TraceId', 'DurationMs', 'EventClass'
+    )
+    $otlpColumns = Get-TableColumns -WorkspaceResourceId $workspaceResourceId -TableName 'OTelLogs_CL'
+    $otlpMissing = @($otlpRequired | Where-Object { $_ -notin $otlpColumns })
+    Add-CheckResult 'OTLP table schema' ($otlpMissing.Count -eq 0) $(
+        if ($otlpMissing.Count -eq 0) { 'all showcase columns present' } else { "missing $($otlpMissing -join ', ')" }
+    )
+}
 
 $pipelineResourceId = $pipelineJson.id
 $metricNamesOutput = (Invoke-DemoAzCli -Arguments @(
@@ -226,7 +258,7 @@ if ($vmRunning) {
             -ResourceGroupName $ResourceGroupName `
             -VmName $vmName `
             -ScriptPath $clusterScript `
-            -ScriptArguments @('azure-monitor-pipeline', $pipelineName, $persistentVolumeName)
+            -ScriptArguments @('azure-monitor-pipeline', $pipelineName, $persistentVolumeName, $Protocol)
         Add-CheckResult 'Cluster runtime' $true ($clusterResult -replace "`r?`n", '; ')
     }
     catch {
@@ -242,7 +274,12 @@ if ($vmRunning) {
         '--output', 'tsv',
         '--only-show-errors'
     )).Output
-    foreach ($port in @(514, 4317)) {
+    $ports = switch ($Protocol) {
+        'Syslog' { @(514) }
+        'OTLP' { @(4317) }
+        default { @(514, 4317) }
+    }
+    foreach ($port in $ports) {
         $client = [Net.Sockets.TcpClient]::new()
         try {
             $connected = $client.ConnectAsync($endpoint, $port).Wait([TimeSpan]::FromSeconds(10)) -and $client.Connected
@@ -275,7 +312,8 @@ if (-not $SkipIngestionTest -and $failures.Count -eq 0) {
         -Endpoint $endpoint `
         -DurationMinutes $preflightDurationMinutes `
         -EventsPerSecond $preflightEventsPerSecond `
-        -RunId $runId
+        -RunId $runId `
+        -Protocol $Protocol
     if ($LASTEXITCODE -ne 0) {
         $failures.Add('Ingestion sender failed.')
     }
@@ -284,21 +322,21 @@ if (-not $SkipIngestionTest -and $failures.Count -eq 0) {
         $deadline = [DateTime]::UtcNow.AddMinutes($MaxIngestionWaitMinutes)
         $ingestionPassed = $false
         do {
-            $syslogRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'RawSyslog_CL' -Query @"
-RawSyslog_CL
+            $syslogRows = if ($syslogEnabled) { @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'Syslog' -Query @"
+Syslog
 | where TimeGenerated > ago(30m) and SyslogMessage contains '$escapedRunId'
 | summarize Count=count(), Leaks=countif(SyslogMessage contains 'demo.user@example.com' or SyslogMessage contains 'demo-token-123'), Health=countif(SyslogMessage contains 'event_class=health'), Redacted=countif(SyslogMessage contains '[REDACTED_')
-"@)
-            $otlpRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'OTelLogs_CL' -Query @"
+"@) } else { @() }
+            $otlpRows = if ($otlpEnabled) { @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'OTelLogs_CL' -Query @"
 OTelLogs_CL
 | where TimeGenerated > ago(30m) and DemoRunId == '$escapedRunId'
 | summarize Count=count(), Leaks=countif(Body contains 'demo.user@example.com' or Body contains 'demo-token-123'), Health=countif(EventClass == 'health'), Redacted=countif(Body contains '[REDACTED_')
-"@)
-            $summaryRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'EdgeLogSummary_CL' -Query @"
+"@) } else { @() }
+            $summaryRows = if ($syslogEnabled) { @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'EdgeLogSummary_CL' -Query @"
 EdgeLogSummary_CL
 | where TimeGenerated > ago(30m) and DemoRunId == '$escapedRunId'
 | summarize Rows=count(), Events=sum(EventCount)
-"@)
+"@) } else { @() }
 
             $syslogCount = Get-QueryValue -Rows $syslogRows -Name 'Count'
             $syslogLeaks = Get-QueryValue -Rows $syslogRows -Name 'Leaks'
@@ -311,20 +349,30 @@ EdgeLogSummary_CL
             $summaryRowCount = Get-QueryValue -Rows $summaryRows -Name 'Rows'
             $summaryEventCount = Get-QueryValue -Rows $summaryRows -Name 'Events'
 
-            $ingestionPassed = (
-                $syslogCount -eq $expectedRetainedCount -and $syslogLeaks -eq 0 -and $syslogHealth -eq 0 -and $syslogRedacted -eq $expectedRetainedCount -and
-                $otlpCount -eq $expectedRetainedCount -and $otlpLeaks -eq 0 -and $otlpHealth -eq 0 -and $otlpRedacted -eq $expectedRetainedCount -and
+            $syslogPassed = -not $syslogEnabled -or (
+                $syslogCount -eq $expectedRetainedCount -and $syslogLeaks -eq 0 -and
+                $syslogHealth -eq 0 -and $syslogRedacted -eq $expectedRetainedCount -and
                 $summaryRowCount -gt 0 -and $summaryEventCount -eq $expectedSentCount
             )
+            $otlpPassed = -not $otlpEnabled -or (
+                $otlpCount -eq $expectedRetainedCount -and $otlpLeaks -eq 0 -and
+                $otlpHealth -eq 0 -and $otlpRedacted -eq $expectedRetainedCount
+            )
+            $ingestionPassed = $syslogPassed -and $otlpPassed
             if ($ingestionPassed) {
-                Add-CheckResult 'End-to-end ingestion' $true "run $runId arrived with filtering, redaction, and aggregation"
+                Add-CheckResult 'End-to-end ingestion' $true "$Protocol run $runId arrived with the expected processing"
                 break
             }
 
-            $syslogProgress = "Syslog $syslogCount/$expectedRetainedCount (redacted=$syslogRedacted, leaks=$syslogLeaks, health=$syslogHealth)"
-            $otlpProgress = "OTLP $otlpCount/$expectedRetainedCount (redacted=$otlpRedacted, leaks=$otlpLeaks, health=$otlpHealth)"
-            $summaryProgress = "Summary $summaryEventCount/$expectedSentCount events in $summaryRowCount row(s)"
-            Write-Host "Waiting for ingestion: $syslogProgress; $otlpProgress; $summaryProgress."
+            $progress = @()
+            if ($syslogEnabled) {
+                $progress += "Syslog $syslogCount/$expectedRetainedCount (redacted=$syslogRedacted, leaks=$syslogLeaks, health=$syslogHealth)"
+                $progress += "Summary $summaryEventCount/$expectedSentCount events in $summaryRowCount row(s)"
+            }
+            if ($otlpEnabled) {
+                $progress += "OTLP $otlpCount/$expectedRetainedCount (redacted=$otlpRedacted, leaks=$otlpLeaks, health=$otlpHealth)"
+            }
+            Write-Host "Waiting for ingestion: $($progress -join '; ')."
             if ([DateTime]::UtcNow -lt $deadline) {
                 Start-Sleep -Seconds 20
             }

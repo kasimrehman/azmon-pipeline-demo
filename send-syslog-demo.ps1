@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
+    [Parameter()]
     [ValidateNotNullOrEmpty()]
     [string] $Endpoint,
 
@@ -10,11 +10,22 @@ param(
 
     [Parameter()]
     [ValidateRange(1, 30)]
-    [int] $TimeoutSeconds = 10
+    [int] $TimeoutSeconds = 10,
+
+    [Parameter()]
+    [string] $ConfigFile
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+. (Join-Path $PSScriptRoot 'demo\demo-config.ps1')
+$configState = Get-DemoConfiguration `
+    -Path $ConfigFile `
+    -DefaultDirectory $PSScriptRoot `
+    -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
+$Endpoint = Resolve-DemoConfigurationValue -Name 'Endpoint' -BoundParameters $PSBoundParameters -CurrentValue $Endpoint -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+Assert-DemoConfigurationValue -Name 'Endpoint' -Value $Endpoint
 
 $marker = 'ARC-MONITOR-DEMO-SYSLOG-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
 $timestamp = [DateTime]::UtcNow.ToString(

@@ -1,13 +1,14 @@
 # Azure Monitor pipeline demo
 
 This repository demonstrates an Azure-managed telemetry pipeline running on an
-Arc-enabled K3s cluster. The deployed pipeline accepts both:
+Arc-enabled K3s cluster. The full showcase accepts:
 
 - Syslog over TCP/514 for appliances and legacy systems.
+- CEF over Syslog/TCP on TCP/515 for security appliances.
 - OpenTelemetry logs over OTLP/gRPC on TCP/4317 for modern applications.
 
-You do not need to demonstrate both protocols. Choose the Syslog or OTLP
-experiment below and run only that traffic. The combined pipeline remains
+You do not need to demonstrate every protocol. Choose the Syslog, CEF, or OTLP
+experiment below and run only that traffic. The combined showcase pipeline remains
 deployed, so switching experiments does not require redeployment.
 
 ## What the pipeline demonstrates
@@ -30,7 +31,7 @@ flowchart LR
     dce[Data collection endpoint]
     law[Log Analytics workspace]
 
-    sender -->|Syslog TCP/514 or OTLP gRPC/4317| gateway
+    sender -->|Syslog TCP/514, CEF TCP/515, or OTLP gRPC/4317| gateway
     gateway -->|in-cluster mTLS| pipeline
     pipeline -->|managed identity| dce
     dce --> law
@@ -241,6 +242,91 @@ should contain new records after connectivity is restored.
 
 </details>
 
+<a id="cef-experiment"></a>
+<details>
+<summary><strong>Common Event Format (CEF) ingestion experiment</strong></summary>
+
+### What this experiment shows
+
+The CEF path:
+
+1. Receives CEF messages carried by Syslog over TCP/515.
+2. Parses them with the `MicrosoftCommonSecurityLog` processor.
+3. Maps the fully formed CEF stream to the built-in `CommonSecurityLog` table.
+
+This scenario demonstrates ingestion only. It does not apply filtering,
+redaction, aggregation, or persistent recovery.
+
+### Prepare the CEF experiment
+
+CEF requires the built-in `CommonSecurityLog` table. Enable Microsoft Sentinel
+on the workspace and confirm this query resolves before running setup:
+
+```kusto
+CommonSecurityLog
+| take 0
+```
+
+Apply the showcase overlay and run the CEF-specific readiness check:
+
+```powershell
+.\setup-demo.ps1
+.\test-demo-readiness.ps1 -Protocol CEF
+```
+
+### Generate CEF traffic
+
+Send ten synthetic firewall events:
+
+```powershell
+.\send-cef-demo.ps1 `
+    -RunId 'CEF-DEMO-20260924-01' `
+    -Count 10
+```
+
+The command prints one exact CEF wire-message sample and a summary containing
+the endpoint, run ID, and number of records sent.
+
+### Verify ingestion
+
+In the Log Analytics workspace, run:
+
+```kusto
+let RunId = "CEF-DEMO-20260924-01";
+CommonSecurityLog
+| where DeviceCustomString1 == RunId
+| project
+    TimeGenerated,
+    DeviceVendor,
+    DeviceProduct,
+    DeviceVersion,
+    DeviceEventClassID,
+    Activity,
+    LogSeverity,
+    SourceIP,
+    SourcePort,
+    DestinationIP,
+    DestinationPort,
+    DeviceAction,
+    ApplicationProtocol,
+    DeviceCustomString1Label,
+    DeviceCustomString1
+| order by TimeGenerated desc
+```
+
+Expected values include:
+
+- `DeviceVendor`: `Contoso`
+- `DeviceProduct`: `Demo Firewall`
+- `Activity`: `Allowed HTTPS connection`
+- `DeviceCustomString1Label`: `DemoRunId`
+- `DeviceCustomString1`: the supplied run ID
+
+Log Analytics ingestion can take several minutes. The built-in table can exist
+and still show zero rows until a valid CEF message completes this path.
+
+</details>
+
 <a id="otlp-experiment"></a>
 <details>
 <summary><strong>OpenTelemetry (OTLP) experiment</strong></summary>
@@ -356,18 +442,21 @@ queue drains.
 
 ## Shared operational notes
 
-- The deployed pipeline keeps both receivers available. Selecting a scenario
+- The deployed showcase keeps all three receivers available. Selecting a scenario
   changes only generated traffic and validation; it does not redeploy Azure
   resources.
 - Log Analytics ingestion can take several minutes after the sender stops.
 - The public client-to-Traefik hop is raw protocol transport. The
   Traefik-to-pipeline hop uses mTLS.
-- Only the CIDR configured during deployment can reach TCP/514 and TCP/4317.
+- Only the CIDR configured during deployment can reach TCP/514, TCP/515, and
+  TCP/4317.
 - The Syslog scenario is generally available. The OTLP receiver and OTLP log
   path used by this demo are preview features.
 - Retained individual Syslog records use the built-in `Syslog` table.
   `EdgeLogSummary_CL` remains custom because aggregate rows are not individual
   Syslog events.
+- Parsed CEF records use the built-in `CommonSecurityLog` table, which must
+  exist before `setup-demo.ps1` deploys the CEF path.
 
 If an interrupted recovery test leaves the DCE route blocked, restore it:
 

@@ -19,6 +19,12 @@ param dataCollectionEndpointLogsIngestionUrl string
 @description('Object ID of the Azure Monitor pipeline extension managed identity.')
 param pipelineExtensionPrincipalId string
 
+@description('Name of the existing network security group protecting the demo VM.')
+param networkSecurityGroupName string
+
+@description('CIDR allowed to send CEF traffic to the demo endpoint.')
+param allowedSourceCidr string
+
 @description('Persistent volume prepared by setup-demo.ps1.')
 param persistentVolumeName string = 'azure-monitor-pipeline-demo-pv'
 
@@ -43,6 +49,184 @@ var monitoringMetricsPublisherRoleDefinitionId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   '3913510d-42f4-4e42-8a64-420c390055eb'
 )
+var commonSecurityLogColumns = [
+  'TimeGenerated'
+  'DeviceVendor'
+  'DeviceProduct'
+  'DeviceVersion'
+  'DeviceEventClassID'
+  'Activity'
+  'LogSeverity'
+  'OriginalLogSeverity'
+  'AdditionalExtensions'
+  'DeviceAction'
+  'ApplicationProtocol'
+  'EventCount'
+  'DestinationDnsDomain'
+  'DestinationServiceName'
+  'DestinationTranslatedAddress'
+  'DestinationTranslatedPort'
+  'CommunicationDirection'
+  'DeviceDnsDomain'
+  'DeviceExternalID'
+  'DeviceFacility'
+  'DeviceInboundInterface'
+  'DeviceNtDomain'
+  'DeviceOutboundInterface'
+  'DevicePayloadId'
+  'ProcessName'
+  'DeviceTranslatedAddress'
+  'DestinationHostName'
+  'DestinationMACAddress'
+  'DestinationNTDomain'
+  'DestinationProcessId'
+  'DestinationUserPrivileges'
+  'DestinationProcessName'
+  'DestinationPort'
+  'DestinationIP'
+  'DeviceTimeZone'
+  'DestinationUserID'
+  'DestinationUserName'
+  'DeviceAddress'
+  'DeviceName'
+  'DeviceMacAddress'
+  'ProcessID'
+  'EndTime'
+  'ExternalID'
+  'ExtID'
+  'FileCreateTime'
+  'FileHash'
+  'FileID'
+  'FileModificationTime'
+  'FilePath'
+  'FilePermission'
+  'FileType'
+  'FileName'
+  'FileSize'
+  'ReceivedBytes'
+  'Message'
+  'OldFileCreateTime'
+  'OldFileHash'
+  'OldFileID'
+  'OldFileModificationTime'
+  'OldFileName'
+  'OldFilePath'
+  'OldFilePermission'
+  'OldFileSize'
+  'OldFileType'
+  'SentBytes'
+  'EventOutcome'
+  'Protocol'
+  'Reason'
+  'RequestURL'
+  'RequestClientApplication'
+  'RequestContext'
+  'RequestCookies'
+  'RequestMethod'
+  'ReceiptTime'
+  'SourceHostName'
+  'SourceMACAddress'
+  'SourceNTDomain'
+  'SourceDnsDomain'
+  'SourceServiceName'
+  'SourceTranslatedAddress'
+  'SourceTranslatedPort'
+  'SourceProcessId'
+  'SourceUserPrivileges'
+  'SourceProcessName'
+  'SourcePort'
+  'SourceIP'
+  'StartTime'
+  'SourceUserID'
+  'SourceUserName'
+  'EventType'
+  'DeviceEventCategory'
+  'DeviceCustomIPv6Address1'
+  'DeviceCustomIPv6Address1Label'
+  'DeviceCustomIPv6Address2'
+  'DeviceCustomIPv6Address2Label'
+  'DeviceCustomIPv6Address3'
+  'DeviceCustomIPv6Address3Label'
+  'DeviceCustomIPv6Address4'
+  'DeviceCustomIPv6Address4Label'
+  'DeviceCustomFloatingPoint1'
+  'DeviceCustomFloatingPoint1Label'
+  'DeviceCustomFloatingPoint2'
+  'DeviceCustomFloatingPoint2Label'
+  'DeviceCustomFloatingPoint3'
+  'DeviceCustomFloatingPoint3Label'
+  'DeviceCustomFloatingPoint4'
+  'DeviceCustomFloatingPoint4Label'
+  'DeviceCustomNumber1'
+  'FieldDeviceCustomNumber1'
+  'DeviceCustomNumber1Label'
+  'DeviceCustomNumber2'
+  'FieldDeviceCustomNumber2'
+  'DeviceCustomNumber2Label'
+  'DeviceCustomNumber3'
+  'FieldDeviceCustomNumber3'
+  'DeviceCustomNumber3Label'
+  'DeviceCustomString1'
+  'DeviceCustomString1Label'
+  'DeviceCustomString2'
+  'DeviceCustomString2Label'
+  'DeviceCustomString3'
+  'DeviceCustomString3Label'
+  'DeviceCustomString4'
+  'DeviceCustomString4Label'
+  'DeviceCustomString5'
+  'DeviceCustomString5Label'
+  'DeviceCustomString6'
+  'DeviceCustomString6Label'
+  'DeviceCustomDate1'
+  'DeviceCustomDate1Label'
+  'DeviceCustomDate2'
+  'DeviceCustomDate2Label'
+  'FlexDate1'
+  'FlexDate1Label'
+  'FlexNumber1'
+  'FlexNumber1Label'
+  'FlexNumber2'
+  'FlexNumber2Label'
+  'FlexString1'
+  'FlexString1Label'
+  'FlexString2'
+  'FlexString2Label'
+  'RemoteIP'
+  'RemotePort'
+  'MaliciousIP'
+  'ThreatSeverity'
+  'IndicatorThreatType'
+  'ThreatDescription'
+  'ThreatConfidence'
+  'ReportReferenceLink'
+  'MaliciousIPLongitude'
+  'MaliciousIPLatitude'
+  'MaliciousIPCountry'
+  'Computer'
+  'SourceSystem'
+  'SimplifiedDeviceAction'
+  'CollectorHostName'
+]
+
+resource networkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2024-05-01' existing = {
+  name: networkSecurityGroupName
+}
+
+resource cefSecurityRule 'Microsoft.Network/networkSecurityGroups/securityRules@2024-05-01' = {
+  parent: networkSecurityGroup
+  name: 'Allow-CEF-Demo-Source'
+  properties: {
+    priority: 120
+    access: 'Allow'
+    direction: 'Inbound'
+    protocol: 'Tcp'
+    sourcePortRange: '*'
+    destinationPortRange: '515'
+    sourceAddressPrefix: allowedSourceCidr
+    destinationAddressPrefix: '*'
+  }
+}
 
 resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2024-03-11' = {
   name: dcrName
@@ -146,6 +330,16 @@ resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2024-03-11' 
       }
       {
         streams: [
+          'Microsoft-CommonSecurityLog-FullyFormed'
+        ]
+        destinations: [
+          'DemoWorkspace'
+        ]
+        transformKql: 'source'
+        outputStream: 'Microsoft-CommonSecurityLog'
+      }
+      {
+        streams: [
           'Custom-OTLP'
         ]
         destinations: [
@@ -205,11 +399,26 @@ resource pipelineGroup 'Microsoft.Monitor/pipelineGroups@2026-04-01' = {
           endpoint: '0.0.0.0:4317'
         }
       }
+      {
+        type: 'Syslog'
+        name: 'cef-receiver'
+        syslog: {
+          endpoint: '0.0.0.0:515'
+          transportProtocol: 'tcp'
+          allowedFormats: [
+            'all'
+          ]
+        }
+      }
     ]
     processors: [
       {
         type: 'MicrosoftSyslog'
         name: 'syslog-processor'
+      }
+      {
+        type: 'MicrosoftCommonSecurityLog'
+        name: 'cef-processor'
       }
       {
         type: 'TransformLanguage'
@@ -352,6 +561,25 @@ resource pipelineGroup 'Microsoft.Monitor/pipelineGroups@2026-04-01' = {
       }
       {
         type: 'AzureMonitorWorkspaceLogs'
+        name: 'cef-exporter'
+        azureMonitorWorkspaceLogs: {
+          api: {
+            dataCollectionEndpointUrl: dataCollectionEndpointLogsIngestionUrl
+            dataCollectionRule: dataCollectionRule.properties.immutableId
+            stream: 'Microsoft-CommonSecurityLog-FullyFormed'
+            schema: {
+              recordMap: [
+                for column in commonSecurityLogColumns: {
+                  from: 'attributes.${column}'
+                  to: column
+                }
+              ]
+            }
+          }
+        }
+      }
+      {
+        type: 'AzureMonitorWorkspaceLogs'
         name: 'otlp-exporter'
         azureMonitorWorkspaceLogs: {
           api: {
@@ -457,6 +685,19 @@ resource pipelineGroup 'Microsoft.Monitor/pipelineGroups@2026-04-01' = {
           ]
           exporters: [
             'otlp-exporter'
+          ]
+        }
+        {
+          name: 'cef-pipeline'
+          type: 'Logs'
+          receivers: [
+            'cef-receiver'
+          ]
+          processors: [
+            'cef-processor'
+          ]
+          exporters: [
+            'cef-exporter'
           ]
         }
       ]

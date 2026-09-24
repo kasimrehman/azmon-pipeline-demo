@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 3 || $# -gt 4 ]]; then
-  echo "Usage: $0 <pipeline-namespace> <pipeline-name> <persistent-volume-name> [Syslog|OTLP|Both]" >&2
+  echo "Usage: $0 <pipeline-namespace> <pipeline-name> <persistent-volume-name> [Syslog|OTLP|CEF|Both|All]" >&2
   exit 2
 fi
 
@@ -50,16 +50,23 @@ ready_addresses="$(kubectl get endpoints "$pipeline_service" -n "$pipeline_names
 echo "servicePorts=${service_ports}"
 echo "readyAddresses=${ready_addresses}"
 
-if [[ "$protocol" != "Syslog" && "$protocol" != "OTLP" && "$protocol" != "Both" ]]; then
-  echo "Unsupported protocol '$protocol'. Expected Syslog, OTLP, or Both." >&2
+if [[ "$protocol" != "Syslog" && "$protocol" != "OTLP" && "$protocol" != "CEF" && "$protocol" != "Both" && "$protocol" != "All" ]]; then
+  echo "Unsupported protocol '$protocol'. Expected Syslog, OTLP, CEF, Both, or All." >&2
   exit 2
 fi
-if [[ "$protocol" != "OTLP" && " $service_ports " != *" 514 "* ]]; then
+if [[ "$protocol" == "Syslog" || "$protocol" == "Both" || "$protocol" == "All" ]] && \
+  [[ " $service_ports " != *" 514 "* ]]; then
   echo "Pipeline service does not expose required Syslog port 514." >&2
   exit 1
 fi
-if [[ "$protocol" != "Syslog" && " $service_ports " != *" 4317 "* ]]; then
+if [[ "$protocol" == "OTLP" || "$protocol" == "Both" || "$protocol" == "All" ]] && \
+  [[ " $service_ports " != *" 4317 "* ]]; then
   echo "Pipeline service does not expose required OTLP port 4317." >&2
+  exit 1
+fi
+if [[ "$protocol" == "CEF" || "$protocol" == "All" ]] && \
+  [[ " $service_ports " != *" 515 "* ]]; then
+  echo "Pipeline service does not expose required CEF port 515." >&2
   exit 1
 fi
 if [[ -z "$ready_addresses" ]]; then

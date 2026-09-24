@@ -17,7 +17,7 @@ param(
     [int] $MaxIngestionWaitMinutes = 15,
 
     [Parameter()]
-    [ValidateSet('Syslog', 'OTLP', 'Both')]
+    [ValidateSet('Syslog', 'OTLP', 'CEF', 'Both', 'All')]
     [string] $Protocol = 'Both',
 
     [Parameter()]
@@ -52,8 +52,9 @@ $pipelineName = "$NamePrefix-pipeline"
 $workspaceName = "$NamePrefix-law"
 $vmName = "$NamePrefix-k3s"
 $persistentVolumeName = 'azure-monitor-pipeline-demo-pv'
-$syslogEnabled = $Protocol -in @('Syslog', 'Both')
-$otlpEnabled = $Protocol -in @('OTLP', 'Both')
+$syslogEnabled = $Protocol -in @('Syslog', 'Both', 'All')
+$otlpEnabled = $Protocol -in @('OTLP', 'Both', 'All')
+$cefEnabled = $Protocol -in @('CEF', 'All')
 
 function Add-CheckResult {
     param(
@@ -205,6 +206,20 @@ if ($otlpEnabled) {
     )
 }
 
+if ($cefEnabled) {
+    $cefRequired = @(
+        'TimeGenerated', 'DeviceVendor', 'DeviceProduct', 'DeviceVersion',
+        'DeviceEventClassID', 'Activity', 'LogSeverity', 'SourceIP',
+        'DestinationIP', 'DestinationPort', 'DeviceCustomString1',
+        'DeviceCustomString1Label'
+    )
+    $cefColumns = Get-TableColumns -WorkspaceResourceId $workspaceResourceId -TableName 'CommonSecurityLog'
+    $cefMissing = @($cefRequired | Where-Object { $_ -notin $cefColumns })
+    Add-CheckResult 'CommonSecurityLog table schema' ($cefMissing.Count -eq 0) $(
+        if ($cefMissing.Count -eq 0) { 'all CEF demo columns present' } else { "missing $($cefMissing -join ', ')" }
+    )
+}
+
 $pipelineResourceId = $pipelineJson.id
 $metricNamesOutput = (Invoke-DemoAzCli -Arguments @(
     'monitor', 'metrics', 'list-definitions',
@@ -277,6 +292,8 @@ if ($vmRunning) {
     $ports = switch ($Protocol) {
         'Syslog' { @(514) }
         'OTLP' { @(4317) }
+        'CEF' { @(515) }
+        'All' { @(514, 4317, 515) }
         default { @(514, 4317) }
     }
     foreach ($port in $ports) {
@@ -308,13 +325,35 @@ if (-not $SkipIngestionTest -and $failures.Count -eq 0) {
     $runId = 'PREFLIGHT-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')
     Write-Host ''
     Write-Host "Sending a short preflight run: $runId"
-    & (Join-Path $PSScriptRoot 'run-demo.ps1') `
-        -Endpoint $endpoint `
-        -DurationMinutes $preflightDurationMinutes `
-        -EventsPerSecond $preflightEventsPerSecond `
-        -RunId $runId `
-        -Protocol $Protocol
-    if ($LASTEXITCODE -ne 0) {
+    $senderFailed = $false
+    if ($syslogEnabled -or $otlpEnabled) {
+        $telemetryProtocol = if ($syslogEnabled -and $otlpEnabled) {
+            'Both'
+        }
+        elseif ($syslogEnabled) {
+            'Syslog'
+        }
+        else {
+            'OTLP'
+        }
+        & (Join-Path $PSScriptRoot 'run-demo.ps1') `
+            -Endpoint $endpoint `
+            -DurationMinutes $preflightDurationMinutes `
+            -EventsPerSecond $preflightEventsPerSecond `
+            -RunId $runId `
+            -Protocol $telemetryProtocol
+        $senderFailed = $LASTEXITCODE -ne 0
+    }
+    $expectedCefCount = 10
+    if ($cefEnabled -and -not $senderFailed) {
+        & (Join-Path $PSScriptRoot 'send-cef-demo.ps1') `
+            -Endpoint $endpoint `
+            -RunId $runId `
+            -Count $expectedCefCount `
+            -ShowPayloadSample:$false
+        $senderFailed = $LASTEXITCODE -ne 0
+    }
+    if ($senderFailed) {
         $failures.Add('Ingestion sender failed.')
     }
     else {
@@ -337,6 +376,11 @@ EdgeLogSummary_CL
 | where TimeGenerated > ago(30m) and DemoRunId == '$escapedRunId'
 | summarize Rows=count(), Events=sum(EventCount)
 "@) } else { @() }
+            $cefRows = if ($cefEnabled) { @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'CommonSecurityLog' -Query @"
+CommonSecurityLog
+| where TimeGenerated > ago(30m) and DeviceCustomString1 == '$escapedRunId'
+| summarize Count=count(), VendorMatches=countif(DeviceVendor == 'Contoso'), ProductMatches=countif(DeviceProduct == 'Demo Firewall')
+"@) } else { @() }
 
             $syslogCount = Get-QueryValue -Rows $syslogRows -Name 'Count'
             $syslogLeaks = Get-QueryValue -Rows $syslogRows -Name 'Leaks'
@@ -348,6 +392,9 @@ EdgeLogSummary_CL
             $otlpRedacted = Get-QueryValue -Rows $otlpRows -Name 'Redacted'
             $summaryRowCount = Get-QueryValue -Rows $summaryRows -Name 'Rows'
             $summaryEventCount = Get-QueryValue -Rows $summaryRows -Name 'Events'
+            $cefCount = Get-QueryValue -Rows $cefRows -Name 'Count'
+            $cefVendorMatches = Get-QueryValue -Rows $cefRows -Name 'VendorMatches'
+            $cefProductMatches = Get-QueryValue -Rows $cefRows -Name 'ProductMatches'
 
             $syslogPassed = -not $syslogEnabled -or (
                 $syslogCount -eq $expectedRetainedCount -and $syslogLeaks -eq 0 -and
@@ -358,7 +405,12 @@ EdgeLogSummary_CL
                 $otlpCount -eq $expectedRetainedCount -and $otlpLeaks -eq 0 -and
                 $otlpHealth -eq 0 -and $otlpRedacted -eq $expectedRetainedCount
             )
-            $ingestionPassed = $syslogPassed -and $otlpPassed
+            $cefPassed = -not $cefEnabled -or (
+                $cefCount -eq $expectedCefCount -and
+                $cefVendorMatches -eq $expectedCefCount -and
+                $cefProductMatches -eq $expectedCefCount
+            )
+            $ingestionPassed = $syslogPassed -and $otlpPassed -and $cefPassed
             if ($ingestionPassed) {
                 Add-CheckResult 'End-to-end ingestion' $true "$Protocol run $runId arrived with the expected processing"
                 break
@@ -371,6 +423,9 @@ EdgeLogSummary_CL
             }
             if ($otlpEnabled) {
                 $progress += "OTLP $otlpCount/$expectedRetainedCount (redacted=$otlpRedacted, leaks=$otlpLeaks, health=$otlpHealth)"
+            }
+            if ($cefEnabled) {
+                $progress += "CEF $cefCount/$expectedCefCount (vendor=$cefVendorMatches, product=$cefProductMatches)"
             }
             Write-Host "Waiting for ingestion: $($progress -join '; ')."
             if ([DateTime]::UtcNow -lt $deadline) {

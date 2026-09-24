@@ -1,6 +1,6 @@
 # Standalone Arc-enabled Azure Monitor pipeline demo
 
-This package deploys an isolated Ubuntu 22.04 VM running K3s `v1.33.3+k3s1`, connects it to Azure Arc, installs an Azure Monitor pipeline, and exposes source-restricted Syslog TCP/514 and OTLP gRPC/4317 demo endpoints. The Syslog pipeline scenario is generally available; OTLP log collection remains in preview.
+This package deploys an isolated Ubuntu 22.04 VM running K3s `v1.33.3+k3s1`, connects it to Azure Arc, installs an Azure Monitor pipeline, and exposes source-restricted Syslog TCP/514 and OTLP gRPC/4317 base endpoints. The additive showcase also exposes CEF over Syslog/TCP on port 515 after Microsoft Sentinel provisions `CommonSecurityLog`. The Syslog pipeline scenario is generally available; OTLP log collection remains in preview.
 
 It does not depend on the rest of ArcBox. SSH and the Kubernetes API are not exposed publicly; cluster bootstrap uses Azure VM Run Command. Clients send raw Syslog TCP or OTLP gRPC to Traefik. Traefik then uses a managed client certificate and mTLS for the separate in-cluster connection to the pipeline.
 
@@ -10,11 +10,12 @@ It does not depend on the rest of ArcBox. SSH and the Kubernetes API are not exp
 - K3s `v1.33.3+k3s1`, connected to Azure Arc with cluster-connect and custom-locations enabled.
 - The `microsoft.certmanagement` and `microsoft.monitor.pipelinecontroller` Arc extensions.
 - A custom location, Log Analytics workspace, data collection endpoint, data collection rule, `OTelLogs_CL` table, and Azure Monitor pipeline group.
-- A Traefik TCP gateway for Syslog TCP/514 and OTLP gRPC/4317.
+- A Traefik TCP gateway for Syslog TCP/514 and OTLP gRPC/4317, extended with
+  CEF TCP/515 by `setup-demo.ps1`.
 
-Only the supplied `AllowedSourceCidr` can reach ports 514 and 4317. The NSG does not expose SSH or the Kubernetes API. The deployment temporarily grants the VM identity the Arc onboarding role and removes that assignment after bootstrap.
+Only the supplied `AllowedSourceCidr` can reach ports 514, 515, and 4317. The NSG does not expose SSH or the Kubernetes API. The deployment temporarily grants the VM identity the Arc onboarding role and removes that assignment after bootstrap.
 
-For component relationships, deployment sequencing, identity and certificate trust, and end-to-end telemetry flows, see the [detailed architecture](architecture.md). Use [demo setup and operations](demo-setup.md) to install and verify the showcase, then select the [Syslog or OTLP experiment](../README.md) for the presentation.
+For component relationships, deployment sequencing, identity and certificate trust, and end-to-end telemetry flows, see the [detailed architecture](architecture.md). Use [demo setup and operations](demo-setup.md) to install and verify the showcase, then select the [Syslog, CEF, or OTLP experiment](../README.md) for the presentation.
 
 ## Prerequisites
 

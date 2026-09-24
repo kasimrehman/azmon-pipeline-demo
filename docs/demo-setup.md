@@ -1,8 +1,8 @@
 # Demo setup and operations
 
-This page is for the operator preparing the full Azure Monitor pipeline showcase. The customer-facing Syslog and OTLP experiments are in the [scenario guide](../README.md).
+This page is for the operator preparing the full Azure Monitor pipeline showcase. The customer-facing Syslog, CEF, and OTLP experiments are in the [scenario guide](../README.md).
 
-The showcase is an additive update to the base deployment. It keeps the VM, network, Arc cluster, extensions, custom location, gateway, workspace, DCE, and public endpoints. It updates the existing DCR and pipeline group, continues to use the built-in `Syslog` table, expands `OTelLogs_CL`, and adds `EdgeLogSummary_CL`.
+The showcase is an additive update to the base deployment. It keeps the VM, network, Arc cluster, extensions, custom location, gateway, workspace, and DCE. It updates the existing DCR and pipeline group, continues to use the built-in `Syslog` table, adds CEF ingestion to the built-in `CommonSecurityLog` table, expands `OTelLogs_CL`, and adds `EdgeLogSummary_CL`.
 
 ## Prerequisites
 
@@ -10,7 +10,10 @@ The showcase is an additive update to the base deployment. It keeps the VM, netw
 2. Use a workstation whose public IPv4 address is covered by the deployment's `AllowedSourceCidr`.
 3. Install Azure CLI, PowerShell, and Python 3, then authenticate with `az login`.
 4. Confirm the operator can update the resource group, DCR, pipeline group, Log Analytics tables, and invoke VM Run Command.
-5. Ensure the VM hosting K3s is running. Starting a previously deallocated VM does not redeploy or replace the environment:
+5. Enable Microsoft Sentinel on the workspace and confirm that
+   `CommonSecurityLog | take 0` resolves. The setup stops with a clear error
+   rather than deploying a CEF data flow when the built-in table is absent.
+6. Ensure the VM hosting K3s is running. Starting a previously deallocated VM does not redeploy or replace the environment:
 
    ```powershell
    az vm start `
@@ -33,11 +36,16 @@ The setup performs these operations:
 
 - Creates an 8 GiB static persistent volume and reserves up to 2 GiB for each of two exporter queues, leaving filesystem headroom.
 - Routes normalized, filtered, and redacted records to the built-in `Syslog` table.
+- Adds a separate TCP/515 receiver that parses CEF and writes it unchanged to
+  the built-in `CommonSecurityLog` table.
 - Expands the OTLP table with run, sequence, service, environment, site, trace, duration, and event-class fields.
 - Creates `EdgeLogSummary_CL`.
 - Adds Syslog and OTLP filtering and redaction processors.
 - Adds a one-minute Syslog aggregation branch before raw-event filtering, preserving volume counts without storing every health record.
 - Enables persistent exporter queues for OTLP and the Syslog summary branch. The individual-record Syslog exporter remains non-persistent.
+- Adds the source-restricted TCP/515 NSG rule and updates the existing Traefik
+  release with the CEF route. These are incremental updates and do not recreate
+  the VM, cluster, workspace, DCE, or public IP.
 
 The volume uses `hostPath` and advertises `ReadWriteMany`. K3s runs the pipeline collector in a user namespace, so setup makes the dedicated synthetic buffer directory mode `0777`; container root otherwise cannot create queue segments on the host path. This permissive local path is suitable only for this isolated single-node demonstration and must not hold secrets or unrelated data. Use secured, resilient shared storage that genuinely supports `ReadWriteMany` for a production or multi-node design.
 
@@ -54,6 +62,10 @@ Run the full preflight:
 The preflight verifies the Azure deployment, pipeline state, table schemas, built-in pipeline metrics, bound persistent volume, inactive outage control, ready receiver endpoints, public TCP reachability, and an end-to-end test run. The ingestion check can take several minutes because it waits for Log Analytics and the one-minute aggregation window.
 
 Set `-Protocol Syslog` or `-Protocol OTLP` to validate only that presentation path. The default is `Both`. Protocol selection affects the local checks and generated traffic only; it does not redeploy or modify the Azure pipeline.
+
+Set `-Protocol CEF` to validate only CEF ingestion, or `-Protocol All` to
+validate Syslog, OTLP, and CEF together. `Both` retains its original meaning of
+Syslog plus OTLP.
 
 If the VM is stopped or deallocated, the Azure resources and schemas can still pass while the site runtime and receiver ports are unavailable. The preflight reports the VM power state, prints the exact `az vm start` command, and skips the dependent cluster and TCP checks until the VM is running.
 

@@ -9,17 +9,23 @@ report_exit_code() {
 }
 trap report_exit_code EXIT
 
-if [[ $# -ne 3 ]]; then
-  echo "Usage: $0 <pipeline-namespace> <pipeline-name> <traefik-chart-version>" >&2
+if [[ $# -lt 3 || $# -gt 4 ]]; then
+  echo "Usage: $0 <pipeline-namespace> <pipeline-name> <traefik-chart-version> [true|false]" >&2
   exit 2
 fi
 
 pipeline_namespace="$1"
 pipeline_name="$2"
 traefik_chart_version="$3"
+enable_cef="${4:-false}"
 gateway_selector="${pipeline_name}-gateway"
 helm_release="traefik-${pipeline_name}"
 pipeline_service="${pipeline_name}-service"
+
+if [[ "$enable_cef" != "true" && "$enable_cef" != "false" ]]; then
+  echo "enable-cef must be true or false." >&2
+  exit 2
+fi
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
@@ -74,6 +80,7 @@ for attempt in {1..90}; do
     2>/dev/null || true)"
   if [[ " $service_ports " == *" 514 "* ]] && \
     [[ " $service_ports " == *" 4317 "* ]] && \
+    { [[ "$enable_cef" == "false" ]] || [[ " $service_ports " == *" 515 "* ]]; } && \
     [[ -n "$ready_addresses" ]]; then
     break
   fi
@@ -149,26 +156,63 @@ spec:
           serversTransport: ${pipeline_name}-mtls-transport
 EOF
 
-helm upgrade --install "$helm_release" traefik/traefik \
-  --version "$traefik_chart_version" \
-  --namespace "$pipeline_namespace" \
-  --set deployment.replicas=1 \
-  --set providers.kubernetesIngress.enabled=false \
-  --set providers.kubernetesCRD.enabled=true \
-  --set "providers.kubernetesCRD.labelSelector=traefik-instance=${gateway_selector}" \
-  --set ports.tcp-syslog.port=514 \
-  --set ports.tcp-syslog.expose.default=true \
-  --set ports.tcp-syslog.exposedPort=514 \
-  --set ports.tcp-syslog.protocol=TCP \
-  --set ports.tcp-otlp.port=4317 \
-  --set ports.tcp-otlp.expose.default=true \
-  --set ports.tcp-otlp.exposedPort=4317 \
-  --set ports.tcp-otlp.protocol=TCP \
-  --set ports.web.expose.default=false \
-  --set ports.websecure.expose.default=false \
-  --set service.type=LoadBalancer \
-  --wait \
+if [[ "$enable_cef" == "true" ]]; then
+cat <<EOF | kubectl apply -f -
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteTCP
+metadata:
+  name: ${pipeline_name}-cef-route
+  namespace: ${pipeline_namespace}
+  labels:
+    traefik-instance: ${gateway_selector}
+spec:
+  entryPoints:
+    - tcp-cef
+  routes:
+    - match: HostSNI(\`*\`)
+      services:
+        - name: ${pipeline_service}
+          port: 515
+          tls: true
+          serversTransport: ${pipeline_name}-mtls-transport
+EOF
+else
+  kubectl delete ingressroutetcp "${pipeline_name}-cef-route" \
+    -n "$pipeline_namespace" --ignore-not-found
+fi
+
+helm_args=(
+  upgrade --install "$helm_release" traefik/traefik
+  --version "$traefik_chart_version"
+  --namespace "$pipeline_namespace"
+  --set deployment.replicas=1
+  --set providers.kubernetesIngress.enabled=false
+  --set providers.kubernetesCRD.enabled=true
+  --set "providers.kubernetesCRD.labelSelector=traefik-instance=${gateway_selector}"
+  --set ports.tcp-syslog.port=514
+  --set ports.tcp-syslog.expose.default=true
+  --set ports.tcp-syslog.exposedPort=514
+  --set ports.tcp-syslog.protocol=TCP
+  --set ports.tcp-otlp.port=4317
+  --set ports.tcp-otlp.expose.default=true
+  --set ports.tcp-otlp.exposedPort=4317
+  --set ports.tcp-otlp.protocol=TCP
+  --set ports.web.expose.default=false
+  --set ports.websecure.expose.default=false
+  --set service.type=LoadBalancer
+  --wait
   --timeout 10m
+)
+if [[ "$enable_cef" == "true" ]]; then
+  helm_args+=(
+    --set ports.tcp-cef.port=515
+    --set ports.tcp-cef.expose.default=true
+    --set ports.tcp-cef.exposedPort=515
+    --set ports.tcp-cef.protocol=TCP
+  )
+fi
+
+helm "${helm_args[@]}"
 
 kubectl wait --for=condition=Available "deployment/${helm_release}" \
   -n "$pipeline_namespace" \

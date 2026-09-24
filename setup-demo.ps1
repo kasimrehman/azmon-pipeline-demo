@@ -50,6 +50,7 @@ Assert-DemoConfigurationValue -Name 'NamePrefix' -Value $NamePrefix
 
 $showcaseTemplate = Join-Path $PSScriptRoot 'demo\showcase.bicep'
 $storageScript = Join-Path $PSScriptRoot 'demo\prepare-demo-storage.sh'
+$gatewayScript = Join-Path $PSScriptRoot 'configure-gateway.sh'
 $pipelineNamespace = 'azure-monitor-pipeline'
 $persistentVolumeName = 'azure-monitor-pipeline-demo-pv'
 $vmName = "$NamePrefix-k3s"
@@ -59,11 +60,13 @@ $customLocationName = "$NamePrefix-monitor"
 $pipelineName = "$NamePrefix-pipeline"
 $pipelineExtensionName = 'azure-monitor-pipeline'
 $deploymentName = "$NamePrefix-demo-showcase"
+$networkSecurityGroupName = "$NamePrefix-nsg"
+$traefikChartVersion = '41.6.0'
 
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
     throw 'Azure CLI is required and was not found on PATH.'
 }
-foreach ($requiredFile in @($showcaseTemplate, $storageScript)) {
+foreach ($requiredFile in @($showcaseTemplate, $storageScript, $gatewayScript)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Required demo file not found: $requiredFile"
     }
@@ -151,6 +154,17 @@ $workspaceResourceId = Get-AzValue @(
     '--workspace-name', $workspaceName,
     '--query', 'id'
 )
+$commonSecurityLogResult = Invoke-DemoAzCli -Arguments @(
+    'rest',
+    '--method', 'get',
+    '--uri', "https://management.azure.com$workspaceResourceId/tables/CommonSecurityLog?api-version=2022-10-01",
+    '--query', 'properties.provisioningState',
+    '--output', 'tsv',
+    '--only-show-errors'
+) -AllowFailure
+if ($commonSecurityLogResult.ExitCode -ne 0 -or $commonSecurityLogResult.Output -ne 'Succeeded') {
+    throw "The built-in CommonSecurityLog table is not ready in '$workspaceName'. Enable Microsoft Sentinel on the workspace, wait for the table provisioning state to become Succeeded, and run setup-demo.ps1 again."
+}
 $dataCollectionEndpointResourceId = Get-AzValue @(
     'monitor', 'data-collection', 'endpoint', 'show',
     '--subscription', $SubscriptionId,
@@ -178,6 +192,14 @@ $pipelineExtensionPrincipalId = Get-AzValue @(
     '--cluster-name', $vmName,
     '--name', $pipelineExtensionName,
     '--query', 'identity.principalId'
+)
+$allowedSourceCidr = Get-AzValue @(
+    'network', 'nsg', 'rule', 'show',
+    '--subscription', $SubscriptionId,
+    '--resource-group', $ResourceGroupName,
+    '--nsg-name', $networkSecurityGroupName,
+    '--name', 'Allow-Syslog-Demo-Source',
+    '--query', 'sourceAddressPrefix'
 )
 
 Get-AzValue @(
@@ -242,12 +264,23 @@ Invoke-DemoAzCli -Arguments @(
     "dataCollectionEndpointResourceId=$dataCollectionEndpointResourceId",
     "dataCollectionEndpointLogsIngestionUrl=$dataCollectionEndpointLogsIngestionUrl",
     "pipelineExtensionPrincipalId=$pipelineExtensionPrincipalId",
+    "networkSecurityGroupName=$networkSecurityGroupName",
+    "allowedSourceCidr=$allowedSourceCidr",
     "persistentVolumeName=$persistentVolumeName",
     "maxStorageUsage=$MaxStorageUsageGiB",
     "retentionPeriod=$RetentionPeriodMinutes",
     '--output', 'none',
     '--only-show-errors'
 ) | Out-Null
+
+Write-Host 'Configuring the gateway with the CEF TCP/515 route...'
+$gatewayOutput = Invoke-DemoVmShellScript `
+    -SubscriptionId $SubscriptionId `
+    -ResourceGroupName $ResourceGroupName `
+    -VmName $vmName `
+    -ScriptPath $gatewayScript `
+    -ScriptArguments @($pipelineNamespace, $pipelineName, $traefikChartVersion, 'true')
+Write-Host $gatewayOutput
 
 $endpoint = Get-AzValue @(
     'network', 'public-ip', 'show',
@@ -260,11 +293,14 @@ $endpoint = Get-AzValue @(
 Write-Host ''
 Write-Host 'Full showcase configuration deployed.'
 Write-Host 'The pipeline controller may need several minutes to reconcile the update.'
+Write-Host "CEF endpoint: ${endpoint}:515"
 if ($PSBoundParameters.ContainsKey('ConfigFile')) {
     Write-Host "Run readiness: & .\test-demo-readiness.ps1 -ConfigFile '$($configState.Path)'"
     Write-Host "Start traffic:  & .\run-demo.ps1 -ConfigFile '$($configState.Path)' -DurationMinutes 2 -EventsPerSecond 5 -RunId 'DEMO-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))'"
+    Write-Host "Send CEF:       & .\send-cef-demo.ps1 -ConfigFile '$($configState.Path)'"
 }
 else {
     Write-Host 'Run readiness: & .\test-demo-readiness.ps1'
     Write-Host "Start traffic:  & .\run-demo.ps1 -DurationMinutes 2 -EventsPerSecond 5 -RunId 'DEMO-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))'"
+    Write-Host 'Send CEF:       & .\send-cef-demo.ps1'
 }

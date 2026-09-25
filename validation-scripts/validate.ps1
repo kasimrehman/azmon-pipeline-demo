@@ -30,10 +30,11 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-. (Join-Path $PSScriptRoot 'demo\demo-config.ps1')
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repositoryRoot 'script-modules\demo-config.ps1')
 $configState = Get-DemoConfiguration `
     -Path $ConfigFile `
-    -DefaultDirectory $PSScriptRoot `
+    -DefaultDirectory $repositoryRoot `
     -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
 $SubscriptionId = Resolve-DemoConfigurationValue -Name 'SubscriptionId' -BoundParameters $PSBoundParameters -CurrentValue $SubscriptionId -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
 $ResourceGroupName = Resolve-DemoConfigurationValue -Name 'ResourceGroupName' -BoundParameters $PSBoundParameters -CurrentValue $ResourceGroupName -Configuration $configState.Values -ConfigurationPath $configState.Path -Required

@@ -23,10 +23,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-. (Join-Path $PSScriptRoot 'demo\demo-config.ps1')
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repositoryRoot 'script-modules\demo-config.ps1')
 $configState = Get-DemoConfiguration `
     -Path $ConfigFile `
-    -DefaultDirectory $PSScriptRoot `
+    -DefaultDirectory $repositoryRoot `
     -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
 $Endpoint = Resolve-DemoConfigurationValue -Name 'Endpoint' -BoundParameters $PSBoundParameters -CurrentValue $Endpoint -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
 Assert-DemoConfigurationValue -Name 'Endpoint' -Value $Endpoint
@@ -118,6 +119,20 @@ if result_name != "SUCCESS":
     if ($LASTEXITCODE -ne 0) {
         throw 'The OTLP exporter did not report a successful export.'
     }
+
+    Write-Host 'First and only logical OTLP message sent:'
+    Write-Host (@{
+        Body       = $marker
+        Attributes = @{
+            'arc.monitor.demo.marker' = $marker
+        }
+        Severity   = 'INFO'
+        ServiceName = 'arc-monitor-external-demo'
+    } | ConvertTo-Json -Depth 4)
+    Write-Host ''
+    Write-Host 'This connectivity probe sends exactly one OTLP log record, so there are no later messages to compare.'
+    Write-Host 'The displayed JSON is a logical representation; OTLP sends the record as protobuf over gRPC.'
+    Write-Host ''
 
     [pscustomobject]@{
         Protocol = 'OTLP/gRPC'

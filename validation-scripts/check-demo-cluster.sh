@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 3 || $# -gt 4 ]]; then
-  echo "Usage: $0 <pipeline-namespace> <pipeline-name> <persistent-volume-name> [Syslog|OTLP|CEF|Both|All]" >&2
+  echo "Usage: check-demo-cluster.sh <pipeline-namespace> <pipeline-name> <persistent-volume-name> [Syslog|OTLP|CEF|Both|All]" >&2
   exit 2
 fi
 

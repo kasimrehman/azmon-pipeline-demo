@@ -33,12 +33,13 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-. (Join-Path $PSScriptRoot 'demo\demo-common.ps1')
-. (Join-Path $PSScriptRoot 'demo\demo-config.ps1')
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repositoryRoot 'script-modules\demo-common.ps1')
+. (Join-Path $repositoryRoot 'script-modules\demo-config.ps1')
 
 $configState = Get-DemoConfiguration `
     -Path $ConfigFile `
-    -DefaultDirectory $PSScriptRoot `
+    -DefaultDirectory $repositoryRoot `
     -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
 $SubscriptionId = Resolve-DemoConfigurationValue -Name 'SubscriptionId' -BoundParameters $PSBoundParameters -CurrentValue $SubscriptionId -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
 $ResourceGroupName = Resolve-DemoConfigurationValue -Name 'ResourceGroupName' -BoundParameters $PSBoundParameters -CurrentValue $ResourceGroupName -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
@@ -265,7 +266,7 @@ else {
 }
 
 if ($vmRunning) {
-    $clusterScript = Join-Path $PSScriptRoot 'demo\check-demo-cluster.sh'
+    $clusterScript = Join-Path $PSScriptRoot 'check-demo-cluster.sh'
     $clusterResult = $null
     try {
         $clusterResult = Invoke-DemoVmShellScript `
@@ -336,7 +337,7 @@ if (-not $SkipIngestionTest -and $failures.Count -eq 0) {
         else {
             'OTLP'
         }
-        & (Join-Path $PSScriptRoot 'run-demo.ps1') `
+        & (Join-Path $repositoryRoot 'generator-scripts\run-demo.ps1') `
             -Endpoint $endpoint `
             -DurationMinutes $preflightDurationMinutes `
             -EventsPerSecond $preflightEventsPerSecond `
@@ -346,7 +347,7 @@ if (-not $SkipIngestionTest -and $failures.Count -eq 0) {
     }
     $expectedCefCount = 10
     if ($cefEnabled -and -not $senderFailed) {
-        & (Join-Path $PSScriptRoot 'send-cef-demo.ps1') `
+        & (Join-Path $repositoryRoot 'generator-scripts\send-cef-demo.ps1') `
             -Endpoint $endpoint `
             -RunId $runId `
             -Count $expectedCefCount `

@@ -274,7 +274,7 @@ flowchart LR
 
         subgraph dfSummaryPipeline["syslog-summary-pipeline"]
             dfSummaryNormalize["MicrosoftSyslog normalize"]
-            dfSummaryBatch["Batch one minute"]
+            dfSummaryBatch["Batch with 60s flush timeout"]
             dfSummaryTransform["Transform extract and summarize"]
             dfSummaryMap["Persistent exporter record map"]
         end
@@ -285,7 +285,7 @@ flowchart LR
         end
 
         subgraph dfOtlpPipeline["otlp-pipeline"]
-            dfOtlpBatch["Batch one minute"]
+            dfOtlpBatch["Batch with 60s flush timeout"]
             dfOtlpFilter["Transform filter and redact"]
             dfOtlpMap["Persistent exporter record map"]
         end
@@ -293,14 +293,14 @@ flowchart LR
 
     dfDce["Data collection endpoint"]
 
-    subgraph dfDcr["DCR azmon-pipeline-dcr"]
+    subgraph dfDcr["DCR prefix-pipeline-dcr"]
         dfDcrSys["Syslog fully formed to Syslog"]
         dfDcrSummary["Custom summary to summary table"]
         dfDcrCef["CEF fully formed to CommonSecurityLog"]
         dfDcrOtlp["Custom OTLP to OTelLogs"]
     end
 
-    subgraph dfLaw["Log Analytics workspace azmon-law"]
+    subgraph dfLaw["Log Analytics workspace prefix-law"]
         dfSysTable[("Syslog table")]
         dfSummaryTable[("EdgeLogSummary_CL table")]
         dfCefTable[("CommonSecurityLog table")]
@@ -378,9 +378,291 @@ input stream to the output stream associated with its destination table.
 | Logical pipeline | Receiver input | Pipeline transformations | Exporter stream | DCR output stream | LAW table |
 | --- | --- | --- | --- | --- | --- |
 | `syslog-pipeline` | RFC Syslog on TCP/514 | Normalize; remove health/debug; redact email/token; map standard fields | `Microsoft-Syslog-FullyFormed` | `Microsoft-Syslog` | `Syslog` |
-| `syslog-summary-pipeline` | Same TCP/514 receiver, parallel branch | Normalize; batch; extract run/site; aggregate by minute and severity; map fields | `Custom-EdgeLogSummary` | `Custom-EdgeLogSummary_CL` | `EdgeLogSummary_CL` |
+| `syslog-summary-pipeline` | Same TCP/514 receiver, parallel branch | Normalize; batch with 60-second flush timeout; extract run/site; bucket by minute; aggregate by run, site, and severity; map fields | `Custom-EdgeLogSummary` | `Custom-EdgeLogSummary_CL` | `EdgeLogSummary_CL` |
 | `cef-pipeline` | CEF inside Syslog on TCP/515 | Parse CEF header/extensions; map full standard schema | `Microsoft-CommonSecurityLog-FullyFormed` | `Microsoft-CommonSecurityLog` | `CommonSecurityLog` |
 | `otlp-pipeline` | OTLP logs on TCP/4317 | Batch; remove health/debug; redact email/token; map body and attributes | `Custom-OTLP` | `Custom-OTelLogs_CL` | `OTelLogs_CL` |
+
+### Focused view 1: from the workstation to a pipeline receiver
+
+This view stops at the first processing boundary. All three senders run on the
+client workstation and connect to the same public IP. The NSG does not parse or
+change records; it only accepts connections from `AllowedSourceCidr` on the
+three configured ports. Traefik also does not change message content. It
+selects a route by destination port and creates a separate mTLS connection to
+the corresponding in-cluster receiver.
+
+<!-- mermaid-checked: no \n, no em-dash/en-dash, no {} in labels, subgraphs are id["label"], arrows are -->|"label"|, all subgraphs closed by end, ids unique -->
+```mermaid
+flowchart LR
+    subgraph trWorkstation["Client workstation"]
+        trSysSender["Syslog generator"]
+        trCefSender["CEF generator"]
+        trOtlpSender["OTLP generator"]
+    end
+
+    subgraph trAzureNetwork["Azure network edge"]
+        trNsg["NSG source and port allowlist"]
+        trIp["Public IP and VM interface"]
+    end
+
+    subgraph trK3sGateway["K3s gateway"]
+        trTraefik["Traefik TCP entry points"]
+    end
+
+    subgraph trReceivers["Pipeline receiver boundary"]
+        trSysReceiver["syslog-receiver port 514"]
+        trCefReceiver["cef-receiver port 515"]
+        trOtlpReceiver["otlp-receiver port 4317"]
+    end
+
+    trSysSender -->|"RFC Syslog TCP 514"| trNsg
+    trCefSender -->|"RFC Syslog with CEF TCP 515"| trNsg
+    trOtlpSender -->|"OTLP protobuf gRPC TCP 4317"| trNsg
+    trNsg -->|"connection admitted unchanged"| trIp
+    trIp -->|"Traefik LoadBalancer service exposure"| trTraefik
+    trTraefik -->|"mTLS TCP 514"| trSysReceiver
+    trTraefik -->|"mTLS TCP 515"| trCefReceiver
+    trTraefik -->|"mTLS TCP 4317"| trOtlpReceiver
+```
+
+**What changes here:** only the transport connection. The bytes sent by the
+workstation remain unchanged until a receiver decodes its protocol.
+
+**What controls this part:** the NSG rules hold the source CIDR and public-port
+allowlist; the Traefik entry points and `IngressRouteTCP` objects bind each
+public port to the matching receiver port; the pipeline group receiver
+definitions tell the collector which protocols and ports to listen on.
+
+### Focused view 2: Syslog normalization, filtering, and fan-out
+
+One received Syslog record is copied into two logical pipelines. The retained
+record path transforms individual events for the built-in `Syslog` table. The
+summary path branches before filtering, so it sees every source event and
+produces aggregate rows instead of individual Syslog records.
+
+<!-- mermaid-checked: no \n, no em-dash/en-dash, no {} in labels, subgraphs are id["label"], arrows are -->|"label"|, all subgraphs closed by end, ids unique -->
+```mermaid
+flowchart LR
+    syReceiver["syslog-receiver"]
+
+    subgraph syRetained["syslog-pipeline"]
+        syNormalize["MicrosoftSyslog retained path"]
+        syTransform["syslog-filter-redact"]
+        syStandardMap["Map standard Syslog schema"]
+        syStandardStream["Microsoft Syslog fully formed"]
+    end
+
+    subgraph sySummary["syslog-summary-pipeline"]
+        sySummaryNormalize["MicrosoftSyslog summary path"]
+        syBatch["Batch with 60s flush timeout"]
+        syExtract["Extract run ID and site"]
+        syAggregate["Bucket and count by run site severity"]
+        sySummaryMap["Map summary schema"]
+        sySummaryStream["Custom EdgeLogSummary"]
+    end
+
+    syReceiver -->|"copy of each source record"| syNormalize
+    syNormalize -->|"normalized fields"| syTransform
+    syTransform -->|"filtered and redacted records"| syStandardMap
+    syStandardMap -->|"export stream"| syStandardStream
+
+    syReceiver -->|"parallel pre-filter copy"| sySummaryNormalize
+    sySummaryNormalize -->|"all normalized records"| syBatch
+    syBatch -->|"windowed records"| syExtract
+    syExtract -->|"grouping fields"| syAggregate
+    syAggregate -->|"aggregate rows"| sySummaryMap
+    sySummaryMap -->|"export stream"| sySummaryStream
+```
+
+**Where the data changes:**
+
+1. `MicrosoftSyslog` parses the RFC header and creates normalized attributes
+   such as `SeverityLevel`, `ProcessName`, and `SyslogMessage`.
+2. The single `syslog-filter-redact` processor removes health/debug records and
+   replaces the fixed email and token in retained records.
+3. `summary-batch` has a 60-second flush timeout. The `syslog-summary`
+   transform creates the actual one-minute bucket with `bin(TimeGenerated,
+   1m)`, extracts run ID and site, and counts by bucket, run ID, site, and
+   severity. A minute can therefore contain multiple partial aggregate rows
+   when batches split it; queries sum `EventCount` across those rows.
+4. Each exporter record map selects and renames fields to match its stream
+   schema.
+
+**What controls this part:** the pipeline group's `service.pipelines` entries
+link the shared receiver to ordered processor names and one exporter name.
+Those named processor and exporter definitions are stored on the same pipeline
+group resource. Both Syslog logical pipelines reference the same named
+`syslog-processor` definition, but each branch processes its own copy of the
+received record.
+
+### Focused view 3: CEF and OTLP transformations
+
+CEF and OTLP use independent receivers and logical pipelines. CEF is parsed but
+not filtered or redacted. OTLP keeps its native log structure until the
+transform removes low-value events and redacts the body.
+
+<!-- mermaid-checked: no \n, no em-dash/en-dash, no {} in labels, subgraphs are id["label"], arrows are -->|"label"|, all subgraphs closed by end, ids unique -->
+```mermaid
+flowchart LR
+    subgraph ceCefPath["cef-pipeline"]
+        ceReceiver["cef-receiver"]
+        ceParser["MicrosoftCommonSecurityLog"]
+        ceAttributes["Parsed CEF attributes"]
+        ceMap["Full CommonSecurityLog map"]
+        ceStream["Microsoft CEF fully formed"]
+    end
+
+    subgraph otOtlpPath["otlp-pipeline"]
+        otReceiver["otlp-receiver decodes protobuf"]
+        otBatch["Batch with 60s flush timeout"]
+        otTransform["otlp-filter-redact"]
+        otMap["Map body and attributes"]
+        otStream["Custom OTLP"]
+    end
+
+    ceReceiver -->|"Syslog framed CEF text"| ceParser
+    ceParser -->|"header and extension fields"| ceAttributes
+    ceAttributes -->|"no filtering"| ceMap
+    ceMap -->|"export stream"| ceStream
+
+    otReceiver -->|"decoded OTLP log records"| otBatch
+    otBatch -->|"batched records"| otTransform
+    otTransform -->|"filtered and redacted records"| otMap
+    otMap -->|"export stream"| otStream
+```
+
+**Where the data changes:** `MicrosoftCommonSecurityLog` splits the CEF header
+and extensions into the standard security-log attributes. The CEF record map
+then aligns those attributes with the full built-in table schema. For OTLP, the
+receiver decodes protobuf, the single `otlp-filter-redact` transform drops
+health/debug events and redacts the body, and the exporter map projects
+selected native fields and attributes into the custom stream. The OTLP batch
+processor uses a 60-second flush timeout; it does not define an aggregation
+window.
+
+**What controls this part:** `cef-pipeline` names the CEF receiver, parser, and
+exporter. `otlp-pipeline` names the OTLP receiver, ordered batch/transform
+processors, and exporter. Because these lists are independent, changing one
+path does not insert that processor into another path.
+
+### Focused view 4: exporter streams, DCE, DCR, and LAW tables
+
+This is the cloud-ingestion half of the path. Exporters authenticate with the
+pipeline extension managed identity and submit records to the shared DCE. The
+DCE is an endpoint, not a transformation engine. The stream name selects one
+of four data flows in the active DCR. Each data flow applies its `transformKql`,
+chooses an output stream, and routes the result to the workspace destination.
+
+<!-- mermaid-checked: no \n, no em-dash/en-dash, no {} in labels, subgraphs are id["label"], arrows are -->|"label"|, all subgraphs closed by end, ids unique -->
+```mermaid
+flowchart LR
+    subgraph clExporters["Pipeline exporters"]
+        clSysExport["Syslog exporter"]
+        clSummaryExport["Summary persistent exporter"]
+        clCefExport["CEF exporter"]
+        clOtlpExport["OTLP persistent exporter"]
+    end
+
+    clDce["Shared data collection endpoint"]
+
+    subgraph clDcr["DCR prefix-pipeline-dcr"]
+        clSysFlow["Input Syslog fully formed"]
+        clSummaryFlow["Input Custom EdgeLogSummary"]
+        clCefFlow["Input CEF fully formed"]
+        clOtlpFlow["Input Custom OTLP"]
+    end
+
+    subgraph clWorkspace["LAW prefix-law"]
+        clSysSink[("Syslog")]
+        clSummarySink[("EdgeLogSummary_CL")]
+        clCefSink[("CommonSecurityLog")]
+        clOtlpSink[("OTelLogs_CL")]
+    end
+
+    clSysExport -->|"Microsoft Syslog fully formed"| clDce
+    clSummaryExport -->|"Custom EdgeLogSummary"| clDce
+    clCefExport -->|"Microsoft CEF fully formed"| clDce
+    clOtlpExport -->|"Custom OTLP"| clDce
+
+    clDce -->|"stream selects flow"| clSysFlow
+    clDce -->|"stream selects flow"| clSummaryFlow
+    clDce -->|"stream selects flow"| clCefFlow
+    clDce -->|"stream selects flow"| clOtlpFlow
+
+    clSysFlow -->|"source to Microsoft Syslog"| clSysSink
+    clSummaryFlow -->|"source to custom summary"| clSummarySink
+    clCefFlow -->|"source to Microsoft CommonSecurityLog"| clCefSink
+    clOtlpFlow -->|"source to custom OTelLogs"| clOtlpSink
+```
+
+**Where the data changes:** the exporter has already produced the DCR input
+schema. The current DCR expressions are all `source`, so the DCR does not
+change field values. It still changes the stream contract to the output stream
+associated with the final table. A future nontrivial `transformKql` would be an
+additional transformation at this point.
+
+**What controls this part:** each exporter stores the DCE URL, DCR immutable ID,
+input stream name, and record map. The DCR stores the workspace destination and
+the four `dataFlows` entries that bind input streams to output streams. The LAW
+table schema is the final contract that the DCR output must satisfy.
+
+### Focused view 5: objects that hold and link configuration
+
+This control-plane view shows where the instructions live. Dotted arrows mean
+configuration or reconciliation, not telemetry movement.
+
+<!-- mermaid-checked: no \n, no em-dash/en-dash, no {} in labels, subgraphs are id["label"], arrows are -->|"label"|, all subgraphs closed by end, ids unique -->
+```mermaid
+flowchart LR
+    subgraph cfgArm["Azure Resource Manager objects"]
+        cfgPipelineGroup["Pipeline group"]
+        cfgCustomLocation["Custom location"]
+        cfgDcr["Data collection rule"]
+        cfgDce["Data collection endpoint"]
+        cfgLaw["Log Analytics workspace"]
+        cfgTables["Table schemas"]
+    end
+
+    subgraph cfgArc["Arc enabled K3s"]
+        cfgExtension["Pipeline extension and identity"]
+        cfgCollector["Collector workload"]
+        cfgService["Receiver service"]
+    end
+
+    subgraph cfgGateway["Gateway configuration"]
+        cfgNsg["NSG rules"]
+        cfgTraefik["Traefik routes"]
+    end
+
+    cfgPipelineGroup -.->|"contains receiver processor exporter links"| cfgCollector
+    cfgPipelineGroup -.->|"extended location reference"| cfgCustomLocation
+    cfgCustomLocation -.->|"targets Arc cluster and namespace"| cfgExtension
+    cfgExtension -.->|"reconciles"| cfgCollector
+    cfgCollector -.->|"publishes receiver ports"| cfgService
+
+    cfgPipelineGroup -.->|"exporters reference logs ingestion URL"| cfgDce
+    cfgPipelineGroup -.->|"exporters reference immutable ID"| cfgDcr
+    cfgDcr -.->|"data collection endpoint ID"| cfgDce
+    cfgDcr -.->|"destination workspace resource ID"| cfgLaw
+    cfgLaw -.->|"contains"| cfgTables
+    cfgExtension -.->|"Monitoring Metrics Publisher on DCR"| cfgDcr
+
+    cfgNsg -.->|"admits public ports"| cfgTraefik
+    cfgTraefik -.->|"routes ports to service"| cfgService
+```
+
+The principal configuration objects are:
+
+| Object | Information it holds | Link to source or sink |
+| --- | --- | --- |
+| Pipeline group | Receiver endpoints; processor definitions; exporter record maps; ordered logical-pipeline membership | `service.pipelines` names one or more receivers, an ordered processor list, and one or more exporters |
+| Custom location | Arc cluster, extension, namespace, and placement context | Referenced by the pipeline group's `extendedLocation`; no telemetry passes through it |
+| Pipeline controller extension | Managed identity and reconciliation capability | Materializes the pipeline group as a collector workload and service on K3s |
+| Traefik routes | Public entry point to backend service-port mapping and mTLS backend settings | Connect TCP/514, TCP/515, and TCP/4317 to the corresponding receiver ports |
+| DCE | Cloud logs-ingestion URL | Referenced by every exporter; accepts records for the DCR |
+| DCR | Input streams, `transformKql`, output streams, and LAW destination | DCR immutable ID is referenced by exporters; each data flow binds one input stream to one table-compatible output stream |
+| LAW workspace | Destination container and query scope | Its resource ID is stored in the DCR destination |
+| LAW table | Final standard or custom schema and retained records | Selected by the DCR output stream |
 
 ### Syslog
 
@@ -428,6 +710,27 @@ aggregation, or recovery branches.
 
 All payload values shown here are fixed synthetic demonstration values. They do
 not contain credentials or customer data.
+
+### What the generators print
+
+`run-demo.ps1` shows the actual first Syslog and/or logical OTLP record after it
+has been sent. Its accompanying explanation identifies:
+
+- Fields fixed for the whole run, including run ID, site, environment, service
+  identity, and the synthetic values intended for redaction.
+- Fields that change for every record, including timestamp, sequence, duration,
+  and deterministic trace ID.
+- Fields selected from the repeating ten-message event pattern, including
+  event class and severity.
+
+`send-cef-demo.ps1` similarly prints the actual first CEF wire message. All CEF
+records retain the same vendor, product, event class, activity, network
+addresses, action, protocol, and run ID. Timestamp, Syslog process ID, source
+port, and message sequence change for every record.
+
+The small `send-syslog-demo.ps1` and `send-otlp-demo.ps1` connectivity probes
+send only one record. They print that first and only record and explicitly say
+that no later records exist for comparison.
 
 ### Source Syslog format
 
@@ -653,16 +956,20 @@ Certificate renewal is handled by cert-manager according to the certificate reso
 | --- | --- |
 | [`infra.bicep`](../infra.bicep) | Network, VM, managed identity, workspace, and data collection endpoint. |
 | [`monitoring.bicep`](../monitoring.bicep) | DCR, extension-identity role assignment, receivers, processors, exporters, and pipeline group. |
-| [`deploy.ps1`](../deploy.ps1) | Phase 1 orchestration, provider registration, temporary RBAC, extension/custom-location setup, custom table creation, and asynchronous pipeline submission. |
+| [`deployment-scripts/deploy.ps1`](../deployment-scripts/deploy.ps1) | Phase 1 orchestration, provider registration, temporary RBAC, extension/custom-location setup, custom table creation, and asynchronous pipeline submission. |
 | [`demo.config.example.psd1`](../demo.config.example.psd1) | Tracked example of the local post-deployment command configuration. |
-| [`demo/demo-config.ps1`](../demo/demo-config.ps1) | Safe configuration loading, command-line override resolution, validation, and generation. |
-| [`bootstrap-k3s.sh`](../bootstrap-k3s.sh) | Guest provisioning, K3s installation, Arc connection, feature enablement, and readiness checks. |
-| [`prepare-pipeline.sh`](../prepare-pipeline.sh) | Namespace trust opt-in, certificate readiness, compatibility aliasing, and trust-bundle checks. |
-| [`complete-deployment.ps1`](../complete-deployment.ps1) | Portal-gate enforcement and phase 2 VM Run Command orchestration. |
-| [`configure-gateway.sh`](../configure-gateway.sh) | Client certificate, mTLS backend transport, TCP routes, and Traefik Helm release. |
-| [`validate.ps1`](../validate.ps1) | Resource-state and endpoint validation. |
-| [`get-demo-endpoint.ps1`](../get-demo-endpoint.ps1) | Resolves the gateway public IP using the local deployment configuration. |
-| [`send-syslog-demo.ps1`](../send-syslog-demo.ps1) | Marker-based Syslog test traffic. |
-| [`send-cef-demo.ps1`](../send-cef-demo.ps1) | Synthetic CEF-over-Syslog ingestion traffic with run-ID correlation. |
-| [`send-otlp-demo.ps1`](../send-otlp-demo.ps1) | Marker-based OTLP log test traffic. |
-| [`cleanup.ps1`](../cleanup.ps1) | Tag-guarded resource-group deletion. |
+| [`script-modules/demo-config.ps1`](../script-modules/demo-config.ps1) | Safe configuration loading, command-line override resolution, validation, and generation. |
+| [`deployment-scripts/bootstrap-k3s.sh`](../deployment-scripts/bootstrap-k3s.sh) | Guest provisioning, K3s installation, Arc connection, feature enablement, and readiness checks. |
+| [`deployment-scripts/prepare-pipeline.sh`](../deployment-scripts/prepare-pipeline.sh) | Namespace trust opt-in, certificate readiness, compatibility aliasing, and trust-bundle checks. |
+| [`deployment-scripts/complete-deployment.ps1`](../deployment-scripts/complete-deployment.ps1) | Portal-gate enforcement and phase 2 VM Run Command orchestration. |
+| [`deployment-scripts/configure-gateway.sh`](../deployment-scripts/configure-gateway.sh) | Client certificate, mTLS backend transport, TCP routes, and Traefik Helm release. |
+| [`validation-scripts/validate.ps1`](../validation-scripts/validate.ps1) | Resource-state and endpoint validation. |
+| [`validation-scripts/test-demo-readiness.ps1`](../validation-scripts/test-demo-readiness.ps1) | Protocol-selective structural and end-to-end readiness checks. |
+| [`validation-scripts/test-demo-recovery.ps1`](../validation-scripts/test-demo-recovery.ps1) | Persistent queue recovery rehearsal. |
+| [`deployment-scripts/get-demo-endpoint.ps1`](../deployment-scripts/get-demo-endpoint.ps1) | Resolves the gateway public IP using the local deployment configuration. |
+| [`generator-scripts/run-demo.ps1`](../generator-scripts/run-demo.ps1) | Bounded Syslog and OTLP showcase traffic. |
+| [`generator-scripts/send-syslog-demo.ps1`](../generator-scripts/send-syslog-demo.ps1) | Marker-based Syslog test traffic. |
+| [`generator-scripts/send-cef-demo.ps1`](../generator-scripts/send-cef-demo.ps1) | Synthetic CEF-over-Syslog ingestion traffic with run-ID correlation. |
+| [`generator-scripts/send-otlp-demo.ps1`](../generator-scripts/send-otlp-demo.ps1) | Marker-based OTLP log test traffic. |
+| [`operations-scripts/set-demo-outage.ps1`](../operations-scripts/set-demo-outage.ps1) | Controls the scoped DCE-path outage used by recovery rehearsals. |
+| [`deployment-scripts/cleanup.ps1`](../deployment-scripts/cleanup.ps1) | Tag-guarded resource-group deletion. |

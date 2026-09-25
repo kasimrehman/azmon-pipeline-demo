@@ -34,12 +34,13 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-. (Join-Path $PSScriptRoot 'demo\demo-common.ps1')
-. (Join-Path $PSScriptRoot 'demo\demo-config.ps1')
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repositoryRoot 'script-modules\demo-common.ps1')
+. (Join-Path $repositoryRoot 'script-modules\demo-config.ps1')
 
 $configState = Get-DemoConfiguration `
     -Path $ConfigFile `
-    -DefaultDirectory $PSScriptRoot `
+    -DefaultDirectory $repositoryRoot `
     -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
 $SubscriptionId = Resolve-DemoConfigurationValue -Name 'SubscriptionId' -BoundParameters $PSBoundParameters -CurrentValue $SubscriptionId -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
 $ResourceGroupName = Resolve-DemoConfigurationValue -Name 'ResourceGroupName' -BoundParameters $PSBoundParameters -CurrentValue $ResourceGroupName -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
@@ -48,8 +49,8 @@ Assert-DemoConfigurationValue -Name 'SubscriptionId' -Value $SubscriptionId
 Assert-DemoConfigurationValue -Name 'ResourceGroupName' -Value $ResourceGroupName
 Assert-DemoConfigurationValue -Name 'NamePrefix' -Value $NamePrefix
 
-$showcaseTemplate = Join-Path $PSScriptRoot 'demo\showcase.bicep'
-$storageScript = Join-Path $PSScriptRoot 'demo\prepare-demo-storage.sh'
+$showcaseTemplate = Join-Path $repositoryRoot 'demo\showcase.bicep'
+$storageScript = Join-Path $PSScriptRoot 'prepare-demo-storage.sh'
 $gatewayScript = Join-Path $PSScriptRoot 'configure-gateway.sh'
 $pipelineNamespace = 'azure-monitor-pipeline'
 $persistentVolumeName = 'azure-monitor-pipeline-demo-pv'
@@ -163,7 +164,7 @@ $commonSecurityLogResult = Invoke-DemoAzCli -Arguments @(
     '--only-show-errors'
 ) -AllowFailure
 if ($commonSecurityLogResult.ExitCode -ne 0 -or $commonSecurityLogResult.Output -ne 'Succeeded') {
-    throw "The built-in CommonSecurityLog table is not ready in '$workspaceName'. Enable Microsoft Sentinel on the workspace, wait for the table provisioning state to become Succeeded, and run setup-demo.ps1 again."
+    throw "The built-in CommonSecurityLog table is not ready in '$workspaceName'. Enable Microsoft Sentinel on the workspace, wait for the table provisioning state to become Succeeded, and run .\deployment-scripts\setup-demo.ps1 again."
 }
 $dataCollectionEndpointResourceId = Get-AzValue @(
     'monitor', 'data-collection', 'endpoint', 'show',
@@ -295,12 +296,12 @@ Write-Host 'Full showcase configuration deployed.'
 Write-Host 'The pipeline controller may need several minutes to reconcile the update.'
 Write-Host "CEF endpoint: ${endpoint}:515"
 if ($PSBoundParameters.ContainsKey('ConfigFile')) {
-    Write-Host "Run readiness: & .\test-demo-readiness.ps1 -ConfigFile '$($configState.Path)'"
-    Write-Host "Start traffic:  & .\run-demo.ps1 -ConfigFile '$($configState.Path)' -DurationMinutes 2 -EventsPerSecond 5 -RunId 'DEMO-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))'"
-    Write-Host "Send CEF:       & .\send-cef-demo.ps1 -ConfigFile '$($configState.Path)'"
+    Write-Host "Run readiness: & .\validation-scripts\test-demo-readiness.ps1 -ConfigFile '$($configState.Path)'"
+    Write-Host "Start traffic:  & .\generator-scripts\run-demo.ps1 -ConfigFile '$($configState.Path)' -DurationMinutes 2 -EventsPerSecond 5 -RunId 'DEMO-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))'"
+    Write-Host "Send CEF:       & .\generator-scripts\send-cef-demo.ps1 -ConfigFile '$($configState.Path)'"
 }
 else {
-    Write-Host 'Run readiness: & .\test-demo-readiness.ps1'
-    Write-Host "Start traffic:  & .\run-demo.ps1 -DurationMinutes 2 -EventsPerSecond 5 -RunId 'DEMO-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))'"
-    Write-Host 'Send CEF:       & .\send-cef-demo.ps1'
+    Write-Host 'Run readiness: & .\validation-scripts\test-demo-readiness.ps1'
+    Write-Host "Start traffic:  & .\generator-scripts\run-demo.ps1 -DurationMinutes 2 -EventsPerSecond 5 -RunId 'DEMO-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))'"
+    Write-Host 'Send CEF:       & .\generator-scripts\send-cef-demo.ps1'
 }

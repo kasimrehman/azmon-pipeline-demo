@@ -29,7 +29,7 @@ The showcase is an additive update to the base deployment. It keeps the VM, netw
 Run the one-time setup from the repository root:
 
 ```powershell
-& .\setup-demo.ps1
+& .\deployment-scripts\setup-demo.ps1
 ```
 
 The setup performs these operations:
@@ -56,7 +56,7 @@ The pipeline controller may take several minutes to reconcile the update. Re-run
 Run the full preflight:
 
 ```powershell
-& .\test-demo-readiness.ps1 -Protocol Both
+& .\validation-scripts\test-demo-readiness.ps1 -Protocol Both
 ```
 
 The preflight verifies the Azure deployment, pipeline state, table schemas, built-in pipeline metrics, bound persistent volume, inactive outage control, ready receiver endpoints, public TCP reachability, and an end-to-end test run. The ingestion check can take several minutes because it waits for Log Analytics and the one-minute aggregation window.
@@ -82,7 +82,7 @@ Both the base deployment and the showcase route `Microsoft-Syslog-FullyFormed` t
 Run this once after setup and again after changing the pipeline, network, or storage configuration:
 
 ```powershell
-& .\test-demo-recovery.ps1 -Protocol Both
+& .\validation-scripts\test-demo-recovery.ps1 -Protocol Both
 ```
 
 The rehearsal sends a unique continuous run, interrupts the VM's route to the DCE for 60 seconds, restores it in a `finally` block, and waits for records generated before, during, and after the interruption. A pass proves that the persistent OTLP and Syslog summary queues drained without losing their expected records and that non-persistent individual Syslog ingestion resumed after restoration. It does not claim lossless individual Syslog delivery or guarantee lossless delivery for other outage conditions.
@@ -94,14 +94,14 @@ Use `-Protocol Syslog` to rehearse summary-queue recovery and individual Syslog 
 Start a bounded run. The endpoint is loaded from `demo.config.psd1`:
 
 ```powershell
-& .\run-demo.ps1 `
+& .\generator-scripts\run-demo.ps1 `
     -DurationMinutes 2 `
     -EventsPerSecond 5 `
     -RunId 'DEMO-20260919-01' `
     -Protocol Both
 ```
 
-Choose `-Protocol Syslog`, `-Protocol OTLP`, or `-Protocol Both` without redeploying the pipeline. `Both` is the default. The runner displays one source payload sample by default; pass `-ShowPayloadSample:$false` to suppress it. An OTLP-enabled run creates a cached Python environment under the current user's local application-data directory and later runs reuse it. Syslog-only mode uses Python's standard library and does not install the OpenTelemetry packages. The rate is per enabled protocol, so `5` in `Both` mode sends five Syslog records and five OTLP records per second.
+Choose `-Protocol Syslog`, `-Protocol OTLP`, or `-Protocol Both` without redeploying the pipeline. `Both` is the default. The runner displays the actual first source message and explains which fields remain fixed or vary in later messages; pass `-ShowPayloadSample:$false` to suppress it. An OTLP-enabled run creates a cached Python environment under the current user's local application-data directory and later runs reuse it. Syslog-only mode uses Python's standard library and does not install the OpenTelemetry packages. The rate is per enabled protocol, so `5` in `Both` mode sends five Syslog records and five OTLP records per second.
 
 Generated traffic is synthetic. Most records are low-value health events that the pipeline drops. Retained records contain fixed demonstration email and token values that the pipeline replaces before export.
 
@@ -110,21 +110,21 @@ Generated traffic is synthetic. Most records are low-value health events that th
 Open a separate operator terminal for the restore command. Check the current state first:
 
 ```powershell
-& .\set-demo-outage.ps1 `
+& .\operations-scripts\set-demo-outage.ps1 `
     -Action Status
 ```
 
 While `run-demo.ps1` is sending records, block only the DCE addresses resolved by the VM:
 
 ```powershell
-& .\set-demo-outage.ps1 `
+& .\operations-scripts\set-demo-outage.ps1 `
     -Action Block
 ```
 
 Restore connectivity after one to two minutes:
 
 ```powershell
-& .\set-demo-outage.ps1 `
+& .\operations-scripts\set-demo-outage.ps1 `
     -Action Restore
 ```
 
@@ -148,7 +148,7 @@ A custom workbook is not required. The pipeline resource exposes the health metr
 If anything interrupts the demo, restore the DCE path first:
 
 ```powershell
-& .\set-demo-outage.ps1 `
+& .\operations-scripts\set-demo-outage.ps1 `
     -Action Restore
 ```
 

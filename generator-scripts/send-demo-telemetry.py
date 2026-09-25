@@ -31,7 +31,9 @@ def request_stop(_signum, _frame):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Send bounded Syslog and OTLP demo traffic.")
+    parser = argparse.ArgumentParser(
+        description="Generate bounded Syslog and OTLP demo traffic."
+    )
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--duration-seconds", type=float, required=True)
     parser.add_argument("--events-per-second", type=int, required=True)
@@ -165,6 +167,69 @@ def send_otlp(logger, args, sequence, event):
     return body, attributes
 
 
+def describe_message_variation(args, syslog_enabled, otlp_enabled):
+    description = {
+        "sameForEveryMessage": [
+            f"run ID remains {args.run_id}",
+            "site remains edge-01",
+            "environment remains demo",
+            "synthetic email and token remain fixed before pipeline redaction",
+        ],
+        "differentForLaterMessages": [
+            "sequence and Syslog process ID increase by one",
+            "event timestamp is generated immediately before each send",
+            "event class and severity follow the repeating ten-message pattern",
+            "duration is deterministically derived from sequence",
+            "trace ID is deterministically derived from run ID and sequence",
+        ],
+        "tenMessagePattern": [
+            "health DEBUG",
+            "health DEBUG",
+            "transaction INFO",
+            "health DEBUG",
+            "transaction INFO",
+            "health DEBUG",
+            "transaction INFO",
+            "health DEBUG",
+            "warning WARNING",
+            "error ERROR",
+        ],
+    }
+    if syslog_enabled:
+        description["sameForEverySyslogMessage"] = [
+            "host remains demo-sender",
+            "application remains arc-monitor-demo",
+            "message ID remains DEMO",
+        ]
+    if otlp_enabled:
+        description["sameForEveryOtlpMessage"] = [
+            "service name remains checkout-api",
+            "OTLP resource service name remains arc-monitor-showcase",
+        ]
+    return description
+
+
+def print_message_variation(args, syslog_enabled, otlp_enabled):
+    description = describe_message_variation(args, syslog_enabled, otlp_enabled)
+    sections = (
+        ("The following stays the same:", "sameForEveryMessage"),
+        ("The following changes:", "differentForLaterMessages"),
+        ("Repeating ten-message pattern:", "tenMessagePattern"),
+        ("Syslog fields that stay the same:", "sameForEverySyslogMessage"),
+        ("OTLP fields that stay the same:", "sameForEveryOtlpMessage"),
+    )
+
+    print("\nHow later messages compare with the first message:")
+    for heading, key in sections:
+        values = description.get(key)
+        if not values:
+            continue
+        print(f"\n{heading}")
+        for value in values:
+            print(f"  - {value}")
+    print()
+
+
 def main():
     args = parse_args()
     signal.signal(signal.SIGINT, request_stop)
@@ -172,9 +237,7 @@ def main():
         signal.signal(signal.SIGTERM, request_stop)
 
     started_at = utc_now()
-    deadline = time.monotonic() + args.duration_seconds
     interval = 1.0 / args.events_per_second
-    next_send = time.monotonic()
     counts = {
         "syslog": 0,
         "otlp": 0,
@@ -191,6 +254,8 @@ def main():
     if otlp_enabled:
         logger, provider, exporter = create_otlp_logger(args)
     sequence = 0
+    deadline = time.monotonic() + args.duration_seconds
+    next_send = time.monotonic()
 
     print(
         json.dumps(
@@ -228,10 +293,10 @@ def main():
                 counts["otlp"] += 1
             counts[event[0]] += 1
 
-            if args.show_payload_sample and sequence == 3:
+            if args.show_payload_sample and sequence == 1:
                 sample = {
-                    "status": "source-sample",
-                    "note": "Exact payload sent before edge processing; synthetic values only.",
+                    "status": "first-source-message",
+                    "note": "This is the actual first message sent before edge processing; synthetic values only.",
                     "sequence": sequence,
                 }
                 if syslog_enabled:
@@ -240,6 +305,7 @@ def main():
                     sample["otlpBody"] = otlp_body
                     sample["otlpAttributes"] = otlp_attributes
                 print(json.dumps(sample), flush=True)
+                print_message_variation(args, syslog_enabled, otlp_enabled)
 
             if sequence % max(args.events_per_second * 10, 1) == 0:
                 print(

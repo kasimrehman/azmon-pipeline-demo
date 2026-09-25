@@ -40,12 +40,25 @@ flowchart LR
 For component relationships, trust boundaries, deployment sequencing, and
 complete dataflow details, see [architecture.md](docs/architecture.md).
 
+## Script directories
+
+Run commands from the repository root. Scripts are grouped by purpose:
+
+| Directory | Purpose |
+| --- | --- |
+| [`deployment-scripts`](deployment-scripts) | Infrastructure deployment, showcase setup, endpoint lookup, cleanup, and internal guest configuration scripts. |
+| [`generator-scripts`](generator-scripts) | Syslog, CEF, and OTLP traffic generators. |
+| [`validation-scripts`](validation-scripts) | Base validation, readiness checks, recovery tests, and the internal cluster check. |
+| [`operations-scripts`](operations-scripts) | Temporary DCE-path outage control used by the recovery demonstration. |
+| [`script-modules`](script-modules) | Shared PowerShell configuration and Azure CLI helpers; these are imported by the user-facing scripts. |
+
 ## Deploy and configure
 
 For a new environment, follow [basic-setup.md](docs/basic-setup.md). For an
 existing environment, follow [demo-setup.md](docs/demo-setup.md).
 
-After the infrastructure deployment succeeds, `deploy.ps1` writes the
+After the infrastructure deployment succeeds,
+`deployment-scripts\deploy.ps1` writes the
 non-secret local configuration to the ignored `demo.config.psd1` file.
 Subsequent commands load it automatically.
 
@@ -69,7 +82,7 @@ Retrieve its public endpoint using the subscription, resource group, and prefix
 from the configuration:
 
 ```powershell
-.\get-demo-endpoint.ps1
+.\deployment-scripts\get-demo-endpoint.ps1
 ```
 
 Copy the returned IP into `Endpoint`. For a configuration stored elsewhere, add
@@ -79,8 +92,8 @@ values override values loaded from the file.
 Install the full showcase and verify the common infrastructure once:
 
 ```powershell
-.\setup-demo.ps1
-.\validate.ps1
+.\deployment-scripts\setup-demo.ps1
+.\validation-scripts\validate.ps1
 ```
 
 ## Choose an experiment
@@ -112,7 +125,7 @@ DCE-path failure.
 Run the protocol-specific readiness check:
 
 ```powershell
-.\test-demo-readiness.ps1 -Protocol Syslog
+.\validation-scripts\test-demo-readiness.ps1 -Protocol Syslog
 ```
 
 Open:
@@ -125,15 +138,17 @@ Open:
 ### Generate Syslog traffic
 
 ```powershell
-.\run-demo.ps1 `
+.\generator-scripts\run-demo.ps1 `
     -DurationMinutes 2 `
     -EventsPerSecond 5 `
     -RunId 'SYSLOG-DEMO-20260924-01' `
     -Protocol Syslog
 ```
 
-The payload sample is shown by default. It contains only fixed synthetic values.
-Pass `-ShowPayloadSample:$false` to suppress it.
+The actual first source message is shown by default, followed by an explanation
+of which fields remain fixed and which fields change in later messages. It
+contains only synthetic values. Pass `-ShowPayloadSample:$false` to suppress
+this output.
 
 ### Verify ingestion
 
@@ -203,7 +218,7 @@ the health/debug records excluded from `Syslog`.
 ### Demonstrate Syslog recovery
 
 ```powershell
-.\test-demo-recovery.ps1 `
+.\validation-scripts\test-demo-recovery.ps1 `
     -Protocol Syslog `
     -OutageSeconds 60 `
     -EventsPerSecond 2
@@ -270,8 +285,8 @@ CommonSecurityLog
 Apply the showcase overlay and run the CEF-specific readiness check:
 
 ```powershell
-.\setup-demo.ps1
-.\test-demo-readiness.ps1 -Protocol CEF
+.\deployment-scripts\setup-demo.ps1
+.\validation-scripts\test-demo-readiness.ps1 -Protocol CEF
 ```
 
 ### Generate CEF traffic
@@ -279,12 +294,13 @@ Apply the showcase overlay and run the CEF-specific readiness check:
 Send ten synthetic firewall events:
 
 ```powershell
-.\send-cef-demo.ps1 `
+.\generator-scripts\send-cef-demo.ps1 `
     -RunId 'CEF-DEMO-20260924-01' `
     -Count 10
 ```
 
-The command prints one exact CEF wire-message sample and a summary containing
+The command prints the exact first CEF wire message, explains which fields
+remain fixed and which change in later events, and prints a summary containing
 the endpoint, run ID, and number of records sent.
 
 ### Verify ingestion
@@ -348,7 +364,7 @@ The OTLP path:
 Run the protocol-specific readiness check:
 
 ```powershell
-.\test-demo-readiness.ps1 -Protocol OTLP
+.\validation-scripts\test-demo-readiness.ps1 -Protocol OTLP
 ```
 
 Open:
@@ -361,7 +377,7 @@ Open:
 ### Generate OTLP traffic
 
 ```powershell
-.\run-demo.ps1 `
+.\generator-scripts\run-demo.ps1 `
     -DurationMinutes 2 `
     -EventsPerSecond 5 `
     -RunId 'OTLP-DEMO-20260924-01' `
@@ -369,8 +385,9 @@ Open:
 ```
 
 The first OTLP-enabled run creates a cached Python environment under the current
-user's local application-data directory. Later runs reuse it. The payload sample
-is shown by default; pass `-ShowPayloadSample:$false` to suppress it.
+user's local application-data directory. Later runs reuse it. The actual first
+logical OTLP record is shown by default, followed by an explanation of fixed
+and varying fields; pass `-ShowPayloadSample:$false` to suppress it.
 
 At the default duration and rate, the sender emits 600 OTLP records. The
 ten-event pattern contains five health/debug events and five retained events,
@@ -428,7 +445,7 @@ OTelLogs_CL
 ### Demonstrate OTLP recovery
 
 ```powershell
-.\test-demo-recovery.ps1 `
+.\validation-scripts\test-demo-recovery.ps1 `
     -Protocol OTLP `
     -OutageSeconds 60 `
     -EventsPerSecond 2
@@ -456,12 +473,12 @@ queue drains.
   `EdgeLogSummary_CL` remains custom because aggregate rows are not individual
   Syslog events.
 - Parsed CEF records use the built-in `CommonSecurityLog` table, which must
-  exist before `setup-demo.ps1` deploys the CEF path.
+  exist before `deployment-scripts\setup-demo.ps1` deploys the CEF path.
 
 If an interrupted recovery test leaves the DCE route blocked, restore it:
 
 ```powershell
-.\set-demo-outage.ps1 -Action Restore
+.\operations-scripts\set-demo-outage.ps1 -Action Restore
 ```
 
 For detailed setup, storage, readiness, and troubleshooting instructions, see
@@ -474,7 +491,7 @@ Cleanup deletes the entire standalone resource group and prompts for
 confirmation:
 
 ```powershell
-.\cleanup.ps1
+.\deployment-scripts\cleanup.ps1
 ```
 
 For unattended cleanup, add `-Force`. The script refuses to delete a resource

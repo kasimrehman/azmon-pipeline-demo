@@ -34,10 +34,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-. (Join-Path $PSScriptRoot 'demo\demo-config.ps1')
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repositoryRoot 'script-modules\demo-config.ps1')
 $configState = Get-DemoConfiguration `
     -Path $ConfigFile `
-    -DefaultDirectory $PSScriptRoot `
+    -DefaultDirectory $repositoryRoot `
     -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
 $Endpoint = Resolve-DemoConfigurationValue -Name 'Endpoint' -BoundParameters $PSBoundParameters -CurrentValue $Endpoint -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
 Assert-DemoConfigurationValue -Name 'Endpoint' -Value $Endpoint
@@ -49,7 +50,7 @@ $firstMessage = $null
 try {
     $connectTask = $client.ConnectAsync($Endpoint, $Port)
     if (-not $connectTask.Wait([TimeSpan]::FromSeconds($TimeoutSeconds)) -or -not $client.Connected) {
-        throw "Timed out connecting to ${Endpoint}:$Port. Confirm this client's public IP is allowed by the NSG and run setup-demo.ps1 to configure the CEF route."
+        throw "Timed out connecting to ${Endpoint}:$Port. Confirm this client's public IP is allowed by the NSG and run .\deployment-scripts\setup-demo.ps1 to configure the CEF route."
     }
 
     $client.SendTimeout = $TimeoutSeconds * 1000
@@ -81,8 +82,13 @@ finally {
 }
 
 if ($ShowPayloadSample) {
-    Write-Host 'Source payload sample:'
+    Write-Host 'First source message sent:'
     Write-Host $firstMessage
+    Write-Host ''
+    Write-Host 'How later messages compare with the first message:'
+    Write-Host "- Same: CEF vendor, product, version, event class, activity, severity, source IP, destination IP, destination port, action, protocol, run ID, and DemoRunId label."
+    Write-Host "- Different: the RFC timestamp, Syslog process ID, source port, and message sequence increase for each event."
+    Write-Host "- Every message is therefore the same synthetic event type and run, but has a distinct time and sequence identity."
     Write-Host ''
 }
 

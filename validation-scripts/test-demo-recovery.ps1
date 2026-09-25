@@ -39,12 +39,13 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-. (Join-Path $PSScriptRoot 'demo\demo-common.ps1')
-. (Join-Path $PSScriptRoot 'demo\demo-config.ps1')
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repositoryRoot 'script-modules\demo-common.ps1')
+. (Join-Path $repositoryRoot 'script-modules\demo-config.ps1')
 
 $configState = Get-DemoConfiguration `
     -Path $ConfigFile `
-    -DefaultDirectory $PSScriptRoot `
+    -DefaultDirectory $repositoryRoot `
     -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
 $SubscriptionId = Resolve-DemoConfigurationValue -Name 'SubscriptionId' -BoundParameters $PSBoundParameters -CurrentValue $SubscriptionId -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
 $ResourceGroupName = Resolve-DemoConfigurationValue -Name 'ResourceGroupName' -BoundParameters $PSBoundParameters -CurrentValue $ResourceGroupName -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
@@ -53,8 +54,8 @@ Assert-DemoConfigurationValue -Name 'SubscriptionId' -Value $SubscriptionId
 Assert-DemoConfigurationValue -Name 'ResourceGroupName' -Value $ResourceGroupName
 Assert-DemoConfigurationValue -Name 'NamePrefix' -Value $NamePrefix
 
-$runDemoScript = Join-Path $PSScriptRoot 'run-demo.ps1'
-$outageScript = Join-Path $PSScriptRoot 'set-demo-outage.ps1'
+$runDemoScript = Join-Path $repositoryRoot 'generator-scripts\run-demo.ps1'
+$outageScript = Join-Path $repositoryRoot 'operations-scripts\set-demo-outage.ps1'
 $syslogEnabled = $Protocol -in @('Syslog', 'Both')
 $otlpEnabled = $Protocol -in @('OTLP', 'Both')
 $runId = 'RECOVERY-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)

@@ -1,3 +1,4 @@
+# Shared configuration helpers for scripts in the purpose-based script directories.
 function Resolve-DemoConfigurationPath {
     param(
         [Parameter()][string] $Path,

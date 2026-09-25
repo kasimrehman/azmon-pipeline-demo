@@ -7,4 +7,4 @@ $parameters = @{
     SshPublicKeyPath  = "$HOME\.ssh\id_ed25519.pub"
 }
 
-& "$PSScriptRoot\deploy.ps1" @parameters
+& (Join-Path $PSScriptRoot 'deploy.ps1') @parameters

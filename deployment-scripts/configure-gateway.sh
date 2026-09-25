@@ -10,7 +10,7 @@ report_exit_code() {
 trap report_exit_code EXIT
 
 if [[ $# -lt 3 || $# -gt 4 ]]; then
-  echo "Usage: $0 <pipeline-namespace> <pipeline-name> <traefik-chart-version> [true|false]" >&2
+  echo "Usage: configure-gateway.sh <pipeline-namespace> <pipeline-name> <traefik-chart-version> [true|false]" >&2
   exit 2
 fi
 

@@ -53,15 +53,16 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-. (Join-Path $PSScriptRoot 'demo\demo-config.ps1')
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repositoryRoot 'script-modules\demo-config.ps1')
 $configState = Get-DemoConfiguration `
     -Path $ConfigFile `
-    -DefaultDirectory $PSScriptRoot `
+    -DefaultDirectory $repositoryRoot `
     -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
 $Endpoint = Resolve-DemoConfigurationValue -Name 'Endpoint' -BoundParameters $PSBoundParameters -CurrentValue $Endpoint -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
 Assert-DemoConfigurationValue -Name 'Endpoint' -Value $Endpoint
 
-$emitter = Join-Path $PSScriptRoot 'demo\send-demo-telemetry.py'
+$emitter = Join-Path $PSScriptRoot 'send-demo-telemetry.py'
 $cacheRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'azmon-pipeline-demo'
 $virtualEnvironment = Join-Path $cacheRoot 'otel-1.44.0'
 $otelPython = Join-Path $virtualEnvironment 'Scripts\python.exe'
@@ -84,7 +85,7 @@ foreach ($port in $ports) {
     try {
         $connectTask = $client.ConnectAsync($Endpoint, $port)
         if (-not $connectTask.Wait([TimeSpan]::FromSeconds($TimeoutSeconds)) -or -not $client.Connected) {
-            throw "Timed out connecting to ${Endpoint}:$port. Confirm this client's public IP is allowed by the NSG. If the VM was just started, wait 2-5 minutes for K3s and the TCP listeners to become ready, then retry."
+            throw "Timed out connecting to ${Endpoint}:$port. Confirm this client's public IP is allowed by the NSG. You can find out your client's public IP with '(Invoke-RestMethod 'https://api.ipify.org').Trim()'. Ensure the VM is started. If the VM was just started, wait 2-5 minutes for K3s and the TCP listeners to become ready, then retry."
         }
     }
     finally {

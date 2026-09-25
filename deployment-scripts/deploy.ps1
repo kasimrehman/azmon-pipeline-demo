@@ -46,16 +46,16 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-$scriptRoot = $PSScriptRoot
-$configHelper = Join-Path $scriptRoot 'demo\demo-config.ps1'
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+$configHelper = Join-Path $repositoryRoot 'script-modules\demo-config.ps1'
 . $configHelper
 $configPath = Resolve-DemoConfigurationPath `
     -Path $ConfigFile `
-    -DefaultDirectory $scriptRoot
-$infraTemplate = Join-Path $scriptRoot 'infra.bicep'
-$monitoringTemplate = Join-Path $scriptRoot 'monitoring.bicep'
-$bootstrapScript = Join-Path $scriptRoot 'bootstrap-k3s.sh'
-$pipelinePreparationScript = Join-Path $scriptRoot 'prepare-pipeline.sh'
+    -DefaultDirectory $repositoryRoot
+$infraTemplate = Join-Path $repositoryRoot 'infra.bicep'
+$monitoringTemplate = Join-Path $repositoryRoot 'monitoring.bicep'
+$bootstrapScript = Join-Path $PSScriptRoot 'bootstrap-k3s.sh'
+$pipelinePreparationScript = Join-Path $PSScriptRoot 'prepare-pipeline.sh'
 $pipelineNamespace = 'azure-monitor-pipeline'
 $certificateExtensionName = 'azure-cert-management'
 $pipelineExtensionName = 'azure-monitor-pipeline'
@@ -689,8 +689,8 @@ Write-Host 'Phase 1 complete.'
 Write-Host "In Azure Portal, open resource group '$ResourceGroupName' and wait for deployment '$monitoringDeploymentName' to show Succeeded."
 Write-Host 'Then run:'
 if ($PSBoundParameters.ContainsKey('ConfigFile')) {
-    Write-Host "  & .\complete-deployment.ps1 -ConfigFile '$configPath'"
+    Write-Host "  & .\deployment-scripts\complete-deployment.ps1 -ConfigFile '$configPath'"
 }
 else {
-    Write-Host '  & .\complete-deployment.ps1'
+    Write-Host '  & .\deployment-scripts\complete-deployment.ps1'
 }

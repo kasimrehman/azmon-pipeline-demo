@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "Usage: $0 <pipeline-namespace>" >&2
+  echo "Usage: prepare-pipeline.sh <pipeline-namespace>" >&2
   exit 2
 fi
 

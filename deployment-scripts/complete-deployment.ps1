@@ -22,11 +22,12 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-$configHelper = Join-Path $PSScriptRoot 'demo\demo-config.ps1'
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+$configHelper = Join-Path $repositoryRoot 'script-modules\demo-config.ps1'
 . $configHelper
 $configState = Get-DemoConfiguration `
     -Path $ConfigFile `
-    -DefaultDirectory $PSScriptRoot `
+    -DefaultDirectory $repositoryRoot `
     -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
 $SubscriptionId = Resolve-DemoConfigurationValue -Name 'SubscriptionId' -BoundParameters $PSBoundParameters -CurrentValue $SubscriptionId -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
 $ResourceGroupName = Resolve-DemoConfigurationValue -Name 'ResourceGroupName' -BoundParameters $PSBoundParameters -CurrentValue $ResourceGroupName -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
@@ -128,10 +129,10 @@ Write-Host "OTLP endpoint:   ${publicIpAddress}:4317"
 Write-Host ''
 Write-Host 'Run the demos from this directory:'
 if ($PSBoundParameters.ContainsKey('ConfigFile')) {
-    Write-Host "  & .\send-syslog-demo.ps1 -ConfigFile '$($configState.Path)'"
-    Write-Host "  & .\send-otlp-demo.ps1 -ConfigFile '$($configState.Path)'"
+    Write-Host "  & .\generator-scripts\send-syslog-demo.ps1 -ConfigFile '$($configState.Path)'"
+    Write-Host "  & .\generator-scripts\send-otlp-demo.ps1 -ConfigFile '$($configState.Path)'"
 }
 else {
-    Write-Host '  & .\send-syslog-demo.ps1'
-    Write-Host '  & .\send-otlp-demo.ps1'
+    Write-Host '  & .\generator-scripts\send-syslog-demo.ps1'
+    Write-Host '  & .\generator-scripts\send-otlp-demo.ps1'
 }

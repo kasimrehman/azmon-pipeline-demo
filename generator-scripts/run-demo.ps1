@@ -1,12 +1,12 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
+    [Parameter()]
     [ValidateNotNullOrEmpty()]
     [string] $Endpoint,
 
     [Parameter()]
     [ValidateRange(0.1, 120)]
-    [double] $DurationMinutes = 10,
+    [double] $DurationMinutes = 2,
 
     [Parameter()]
     [ValidateRange(1, 100)]
@@ -15,6 +15,10 @@ param(
     [Parameter()]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$')]
     [string] $RunId = ('DEMO-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')),
+
+    [Parameter()]
+    [ValidateSet('Syslog', 'OTLP', 'Both')]
+    [string] $Protocol = 'Both',
 
     [Parameter()]
     [ValidateRange(1, 65535)]
@@ -37,7 +41,10 @@ param(
     [string] $StopFilePath,
 
     [Parameter()]
-    [switch] $ShowPayloadSample
+    [switch] $ShowPayloadSample = $true,
+
+    [Parameter()]
+    [string] $ConfigFile
 )
 
 Set-StrictMode -Version Latest
@@ -46,10 +53,19 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-$emitter = Join-Path $PSScriptRoot 'demo\send-demo-telemetry.py'
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repositoryRoot 'script-modules\demo-config.ps1')
+$configState = Get-DemoConfiguration `
+    -Path $ConfigFile `
+    -DefaultDirectory $repositoryRoot `
+    -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
+$Endpoint = Resolve-DemoConfigurationValue -Name 'Endpoint' -BoundParameters $PSBoundParameters -CurrentValue $Endpoint -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+Assert-DemoConfigurationValue -Name 'Endpoint' -Value $Endpoint
+
+$emitter = Join-Path $PSScriptRoot 'send-demo-telemetry.py'
 $cacheRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'azmon-pipeline-demo'
 $virtualEnvironment = Join-Path $cacheRoot 'otel-1.44.0'
-$python = Join-Path $virtualEnvironment 'Scripts\python.exe'
+$otelPython = Join-Path $virtualEnvironment 'Scripts\python.exe'
 $readyMarker = Join-Path $virtualEnvironment '.ready'
 
 if (-not (Get-Command $PythonCommand -ErrorAction SilentlyContinue)) {
@@ -59,12 +75,17 @@ if (-not (Test-Path -LiteralPath $emitter -PathType Leaf)) {
     throw "Demo telemetry emitter not found: $emitter"
 }
 
-foreach ($port in @($SyslogPort, $OtlpPort)) {
+$ports = switch ($Protocol) {
+    'Syslog' { @($SyslogPort) }
+    'OTLP' { @($OtlpPort) }
+    default { @($SyslogPort, $OtlpPort) }
+}
+foreach ($port in $ports) {
     $client = [Net.Sockets.TcpClient]::new()
     try {
         $connectTask = $client.ConnectAsync($Endpoint, $port)
         if (-not $connectTask.Wait([TimeSpan]::FromSeconds($TimeoutSeconds)) -or -not $client.Connected) {
-            throw "Timed out connecting to ${Endpoint}:$port. Confirm this client's public IP is allowed by the NSG. If the VM was just started, wait 2-5 minutes for K3s and the TCP listeners to become ready, then retry."
+            throw "Timed out connecting to ${Endpoint}:$port. Confirm this client's public IP is allowed by the NSG. You can find out your client's public IP with '(Invoke-RestMethod 'https://api.ipify.org').Trim()'. Ensure the VM is started. If the VM was just started, wait 2-5 minutes for K3s and the TCP listeners to become ready, then retry."
         }
     }
     finally {
@@ -72,7 +93,7 @@ foreach ($port in @($SyslogPort, $OtlpPort)) {
     }
 }
 
-if (-not (Test-Path -LiteralPath $readyMarker -PathType Leaf)) {
+if ($Protocol -ne 'Syslog' -and -not (Test-Path -LiteralPath $readyMarker -PathType Leaf)) {
     New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
     if (Test-Path -LiteralPath $virtualEnvironment) {
         Remove-Item -LiteralPath $virtualEnvironment -Recurse -Force
@@ -84,7 +105,7 @@ if (-not (Test-Path -LiteralPath $readyMarker -PathType Leaf)) {
         throw 'Failed to create the cached Python virtual environment.'
     }
 
-    & $python -m pip install --quiet --disable-pip-version-check `
+    & $otelPython -m pip install --quiet --disable-pip-version-check `
         'opentelemetry-sdk==1.44.0' `
         'opentelemetry-exporter-otlp-proto-grpc==1.44.0'
     if ($LASTEXITCODE -ne 0) {
@@ -93,10 +114,18 @@ if (-not (Test-Path -LiteralPath $readyMarker -PathType Leaf)) {
     New-Item -ItemType File -Path $readyMarker -Force | Out-Null
 }
 
+$python = if ($Protocol -eq 'Syslog') { $PythonCommand } else { $otelPython }
 $durationSeconds = [Math]::Round($DurationMinutes * 60, 3)
 Write-Host "Run ID: $RunId"
-Write-Host "Sending $EventsPerSecond events/second to each protocol for $DurationMinutes minute(s)."
-Write-Host 'Press Ctrl+C to stop early; the sender will flush queued OTLP records.'
+Write-Host "Protocol: $Protocol"
+Write-Host "Sending $EventsPerSecond events/second per enabled protocol for $DurationMinutes minute(s)."
+$stopMessage = if ($Protocol -eq 'Syslog') {
+    'Press Ctrl+C to stop early.'
+}
+else {
+    'Press Ctrl+C to stop early; the sender will flush queued OTLP records.'
+}
+Write-Host $stopMessage
 Write-Host ''
 
 $emitterArguments = @(
@@ -104,6 +133,7 @@ $emitterArguments = @(
     '--duration-seconds', $durationSeconds,
     '--events-per-second', $EventsPerSecond,
     '--run-id', $RunId,
+    '--protocol', $Protocol.ToLowerInvariant(),
     '--syslog-port', $SyslogPort,
     '--otlp-port', $OtlpPort,
     '--timeout-seconds', $TimeoutSeconds

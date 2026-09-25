@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
+    [Parameter()]
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
     [string] $SubscriptionId,
 
@@ -18,7 +18,10 @@ param(
 
     [Parameter()]
     [ValidateRange(1, 60)]
-    [int] $TcpTimeoutSeconds = 10
+    [int] $TcpTimeoutSeconds = 10,
+
+    [Parameter()]
+    [string] $ConfigFile
 )
 
 Set-StrictMode -Version Latest
@@ -26,6 +29,19 @@ $ErrorActionPreference = 'Stop'
 if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
+
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repositoryRoot 'script-modules\demo-config.ps1')
+$configState = Get-DemoConfiguration `
+    -Path $ConfigFile `
+    -DefaultDirectory $repositoryRoot `
+    -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
+$SubscriptionId = Resolve-DemoConfigurationValue -Name 'SubscriptionId' -BoundParameters $PSBoundParameters -CurrentValue $SubscriptionId -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+$ResourceGroupName = Resolve-DemoConfigurationValue -Name 'ResourceGroupName' -BoundParameters $PSBoundParameters -CurrentValue $ResourceGroupName -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+$NamePrefix = Resolve-DemoConfigurationValue -Name 'NamePrefix' -BoundParameters $PSBoundParameters -CurrentValue $NamePrefix -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+Assert-DemoConfigurationValue -Name 'SubscriptionId' -Value $SubscriptionId
+Assert-DemoConfigurationValue -Name 'ResourceGroupName' -Value $ResourceGroupName
+Assert-DemoConfigurationValue -Name 'NamePrefix' -Value $NamePrefix
 
 function Invoke-AzJson {
     param([Parameter(Mandatory)][string[]] $Arguments)

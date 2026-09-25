@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
+    [Parameter()]
     [ValidateNotNullOrEmpty()]
     [string] $Endpoint,
 
@@ -10,11 +10,23 @@ param(
 
     [Parameter()]
     [ValidateRange(1, 30)]
-    [int] $TimeoutSeconds = 10
+    [int] $TimeoutSeconds = 10,
+
+    [Parameter()]
+    [string] $ConfigFile
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repositoryRoot 'script-modules\demo-config.ps1')
+$configState = Get-DemoConfiguration `
+    -Path $ConfigFile `
+    -DefaultDirectory $repositoryRoot `
+    -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
+$Endpoint = Resolve-DemoConfigurationValue -Name 'Endpoint' -BoundParameters $PSBoundParameters -CurrentValue $Endpoint -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+Assert-DemoConfigurationValue -Name 'Endpoint' -Value $Endpoint
 
 $marker = 'ARC-MONITOR-DEMO-SYSLOG-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
 $timestamp = [DateTime]::UtcNow.ToString(
@@ -35,6 +47,12 @@ try {
     $bytes = [Text.Encoding]::UTF8.GetBytes($message)
     $stream.Write($bytes, 0, $bytes.Length)
     $stream.Flush()
+
+    Write-Host 'First and only source message sent:'
+    Write-Host $message.TrimEnd()
+    Write-Host ''
+    Write-Host 'This connectivity probe sends exactly one message, so there are no later messages to compare.'
+    Write-Host ''
 
     [pscustomobject]@{
         Protocol = 'Syslog/TCP'

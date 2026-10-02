@@ -49,7 +49,7 @@ Run commands from the repository root. Scripts are grouped by purpose:
 | [`deployment-scripts`](deployment-scripts) | Infrastructure deployment, showcase setup, endpoint lookup, cleanup, and internal guest configuration scripts. |
 | [`generator-scripts`](generator-scripts) | Syslog, CEF, and OTLP traffic generators. |
 | [`validation-scripts`](validation-scripts) | Base validation, readiness checks, recovery tests, and the internal cluster check. |
-| [`operations-scripts`](operations-scripts) | Temporary DCE-path outage control used by the recovery demonstration. |
+| [`operations-scripts`](operations-scripts) | Demo outage control, certificate refresh, and temporary Arc portal access. |
 | [`script-modules`](script-modules) | Shared PowerShell configuration and Azure CLI helpers; these are imported by the user-facing scripts. |
 
 ## Deploy and configure
@@ -96,6 +96,30 @@ Install the full showcase and verify the common infrastructure once:
 .\validation-scripts\validate.ps1
 ```
 
+## View the Arc-enabled cluster in the portal
+
+The cluster uses a private Kubernetes API endpoint. To open its Kubernetes
+resource view in the Azure portal, create a dedicated read-only service account
+and print its bearer token in your local terminal:
+
+```powershell
+.\operations-scripts\get-arc-portal-token.ps1
+```
+
+In the Azure portal, open **Azure Arc** > **Kubernetes clusters** >
+`<prefix>-k3s` > **Kubernetes resources**, choose service account token
+authentication, and paste the token. The identity can view workload resources
+and cluster details but cannot read Secrets or modify resources.
+
+The signed-in Azure user also needs an Azure role such as **Azure Arc
+Kubernetes Viewer** on the Arc cluster resource. Treat the bearer token as a
+credential: do not put it in documentation, source control, screenshots, or
+chat. Revoke the service account and its token after inspection:
+
+```powershell
+.\operations-scripts\get-arc-portal-token.ps1 -Revoke
+```
+
 ## Choose an experiment
 
 Expand only the scenario you want to present.
@@ -127,6 +151,12 @@ Run the protocol-specific readiness check:
 ```powershell
 .\validation-scripts\test-demo-readiness.ps1 -Protocol Syslog
 ```
+
+The readiness check also repairs stale certificate state after a VM has been
+stopped across one or more short-lived certificate rotations. It synchronizes
+the current trust roots, reissues mismatched leaf certificates, and restarts
+only workloads that still use older certificate material. This does not
+redeploy the Azure infrastructure.
 
 Open:
 

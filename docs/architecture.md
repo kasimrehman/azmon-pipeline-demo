@@ -228,7 +228,7 @@ The Custom Locations service principal object ID is resolved in the tenant and s
 
 Transport trust is separate from Azure RBAC. The certificate extension maintains the Azure Monitor certificate hierarchy. Namespace labels request server and client trust bundles. Traefik presents a short-lived client certificate to the pipeline, validates the pipeline service certificate against `arc-amp-trust-bundle`, and checks the service's cluster DNS name.
 
-The certificate-management extension can create base root CA Secrets before it creates the active `-current` aliases expected by its ClusterIssuers. `prepare-pipeline.sh` includes an idempotent compatibility step that creates the missing aliases in-cluster without printing certificate or key material.
+The certificate-management extension can create or rotate base root CA Secrets before it creates or updates the active `-current` aliases used to distribute trust. `prepare-pipeline.sh` and the readiness refresh operation include an idempotent compatibility step that reconciles those aliases in-cluster without printing certificate or key material.
 
 ## Telemetry data flow
 
@@ -946,7 +946,7 @@ service-managed columns that are not declared by this demo.
 
 `validate.ps1` verifies the base deployments, Arc connectivity, the exact K3s version, both extensions, the custom location, DCR, pipeline group, custom table, workspace, and TCP reachability of the two base public endpoints. The additive `test-demo-readiness.ps1` verifies showcase markers independently in `Syslog`, `CommonSecurityLog`, `OTelLogs_CL`, and `EdgeLogSummary_CL`.
 
-Certificate renewal is handled by cert-manager according to the certificate resource. Extension and chart versions remain operational dependencies: K3s is explicitly pinned, Traefik is explicitly pinned, and the Arc extensions use automatic minor-version upgrades. Because the OTLP path remains in preview and extension behavior can change across versions, version changes should be validated end to end before reuse.
+Certificate renewal is handled by cert-manager according to the certificate resource. A workload that remains running while its mounted certificate is renewed can continue using the old in-memory certificate. The readiness check compares certificate issuance and pod start times, then restarts only stale pipeline or gateway workloads before testing ingestion. Extension and chart versions remain operational dependencies: K3s is explicitly pinned, Traefik is explicitly pinned, and the Arc extensions use automatic minor-version upgrades. Because the OTLP path remains in preview and extension behavior can change across versions, version changes should be validated end to end before reuse.
 
 `cleanup.ps1` deletes the entire resource group, but only after confirming its standalone workload tag. Deleting the group removes the Azure resources, VM-hosted cluster, Arc projection, telemetry workspace, and role assignments together. Log Analytics data is not retained after workspace deletion.
 
@@ -965,6 +965,9 @@ Certificate renewal is handled by cert-manager according to the certificate reso
 | [`deployment-scripts/configure-gateway.sh`](../deployment-scripts/configure-gateway.sh) | Client certificate, mTLS backend transport, TCP routes, and Traefik Helm release. |
 | [`validation-scripts/validate.ps1`](../validation-scripts/validate.ps1) | Resource-state and endpoint validation. |
 | [`validation-scripts/test-demo-readiness.ps1`](../validation-scripts/test-demo-readiness.ps1) | Protocol-selective structural and end-to-end readiness checks. |
+| [`operations-scripts/refresh-demo-certificates.sh`](../operations-scripts/refresh-demo-certificates.sh) | Restarts pipeline or gateway workloads only when their pods predate the current certificate. |
+| [`operations-scripts/get-arc-portal-token.ps1`](../operations-scripts/get-arc-portal-token.ps1) | Creates or revokes the read-only service account used for the portal Kubernetes resource view. |
+| [`operations-scripts/manage-arc-portal-token.sh`](../operations-scripts/manage-arc-portal-token.sh) | Applies read-only Kubernetes RBAC and manages the portal bearer-token Secret inside the cluster. |
 | [`validation-scripts/test-demo-recovery.ps1`](../validation-scripts/test-demo-recovery.ps1) | Persistent queue recovery rehearsal. |
 | [`deployment-scripts/get-demo-endpoint.ps1`](../deployment-scripts/get-demo-endpoint.ps1) | Resolves the gateway public IP using the local deployment configuration. |
 | [`generator-scripts/run-demo.ps1`](../generator-scripts/run-demo.ps1) | Bounded Syslog and OTLP showcase traffic. |

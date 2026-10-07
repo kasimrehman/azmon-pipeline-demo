@@ -51,6 +51,29 @@ The volume uses `hostPath` and advertises `ReadWriteMany`. K3s runs the pipeline
 
 The pipeline controller may take several minutes to reconcile the update. Re-running the original `monitoring.bicep` deployment restores the base straight-through configuration, so run `setup-demo.ps1` again afterward if that occurs.
 
+## View Kubernetes resources in the Azure portal
+
+Create a dedicated read-only service account token from the repository root:
+
+```powershell
+& .\operations-scripts\get-arc-portal-token.ps1
+```
+
+Paste the token into the Arc-enabled cluster's **Kubernetes resources** service
+account token prompt. The account can view workloads, namespaces, nodes,
+persistent volumes, storage details, and custom resource definitions. It
+cannot read Kubernetes Secrets or modify resources. The signed-in Azure user
+must also have an Azure role such as **Azure Arc Kubernetes Viewer** on the Arc
+cluster resource.
+
+The token is a credential and is intentionally printed only to the local
+terminal. Do not put it in documentation, source control, screenshots, or
+chat. Revoke it after the portal inspection:
+
+```powershell
+& .\operations-scripts\get-arc-portal-token.ps1 -Revoke
+```
+
 ## Prove readiness
 
 Run the full preflight:
@@ -73,7 +96,7 @@ If the pipeline service has no ready endpoints, the check now prints pod status,
 
 Use `-SkipIngestionTest` only for a quick structural check. Do not treat that reduced check as proof that the demo data path works.
 
-The readiness check proves steady-state ingestion, filtering, redaction, and aggregation. It does not simulate an outage or prove buffered recovery.
+The readiness check proves steady-state ingestion, filtering, redaction, and aggregation. It also compares the pipeline and gateway pod start times with their current short-lived certificates. If cert-manager renewed a certificate while the VM or workloads were unavailable, the check restarts only the stale certificate consumer and waits for it to become ready. This avoids an infrastructure redeployment after certificate renewal. The readiness check does not simulate an outage or prove buffered recovery.
 
 Both the base deployment and the showcase route `Microsoft-Syslog-FullyFormed` to the built-in `Syslog` table. The showcase adds schema-preserving filtering and redaction before export and retains `EdgeLogSummary_CL` for aggregate rows. Re-running `setup-demo.ps1` reapplies this configuration without recreating the base infrastructure.
 

@@ -266,6 +266,20 @@ else {
 }
 
 if ($vmRunning) {
+    $certificateRefreshScript = Join-Path $repositoryRoot 'operations-scripts\refresh-demo-certificates.sh'
+    try {
+        $certificateRefreshResult = Invoke-DemoVmShellScript `
+            -SubscriptionId $SubscriptionId `
+            -ResourceGroupName $ResourceGroupName `
+            -VmName $vmName `
+            -ScriptPath $certificateRefreshScript `
+            -ScriptArguments @('azure-monitor-pipeline', $pipelineName)
+        Add-CheckResult 'Certificate consumers' $true ($certificateRefreshResult -replace "`r?`n", '; ')
+    }
+    catch {
+        Add-CheckResult 'Certificate consumers' $false $_.Exception.Message
+    }
+
     $clusterScript = Join-Path $PSScriptRoot 'check-demo-cluster.sh'
     $clusterResult = $null
     try {

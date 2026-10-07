@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
+    [Parameter()]
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
     [string] $SubscriptionId,
 
@@ -22,7 +22,10 @@ param(
 
     [Parameter()]
     [ValidateRange(1, 2880)]
-    [int] $RetentionPeriodMinutes = 120
+    [int] $RetentionPeriodMinutes = 120,
+
+    [Parameter()]
+    [string] $ConfigFile
 )
 
 Set-StrictMode -Version Latest
@@ -31,10 +34,24 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-. (Join-Path $PSScriptRoot 'demo\demo-common.ps1')
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repositoryRoot 'script-modules\demo-common.ps1')
+. (Join-Path $repositoryRoot 'script-modules\demo-config.ps1')
 
-$showcaseTemplate = Join-Path $PSScriptRoot 'demo\showcase.bicep'
-$storageScript = Join-Path $PSScriptRoot 'demo\prepare-demo-storage.sh'
+$configState = Get-DemoConfiguration `
+    -Path $ConfigFile `
+    -DefaultDirectory $repositoryRoot `
+    -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
+$SubscriptionId = Resolve-DemoConfigurationValue -Name 'SubscriptionId' -BoundParameters $PSBoundParameters -CurrentValue $SubscriptionId -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+$ResourceGroupName = Resolve-DemoConfigurationValue -Name 'ResourceGroupName' -BoundParameters $PSBoundParameters -CurrentValue $ResourceGroupName -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+$NamePrefix = Resolve-DemoConfigurationValue -Name 'NamePrefix' -BoundParameters $PSBoundParameters -CurrentValue $NamePrefix -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+Assert-DemoConfigurationValue -Name 'SubscriptionId' -Value $SubscriptionId
+Assert-DemoConfigurationValue -Name 'ResourceGroupName' -Value $ResourceGroupName
+Assert-DemoConfigurationValue -Name 'NamePrefix' -Value $NamePrefix
+
+$showcaseTemplate = Join-Path $repositoryRoot 'demo\showcase.bicep'
+$storageScript = Join-Path $PSScriptRoot 'prepare-demo-storage.sh'
+$gatewayScript = Join-Path $PSScriptRoot 'configure-gateway.sh'
 $pipelineNamespace = 'azure-monitor-pipeline'
 $persistentVolumeName = 'azure-monitor-pipeline-demo-pv'
 $vmName = "$NamePrefix-k3s"
@@ -44,11 +61,13 @@ $customLocationName = "$NamePrefix-monitor"
 $pipelineName = "$NamePrefix-pipeline"
 $pipelineExtensionName = 'azure-monitor-pipeline'
 $deploymentName = "$NamePrefix-demo-showcase"
+$networkSecurityGroupName = "$NamePrefix-nsg"
+$traefikChartVersion = '41.6.0'
 
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
     throw 'Azure CLI is required and was not found on PATH.'
 }
-foreach ($requiredFile in @($showcaseTemplate, $storageScript)) {
+foreach ($requiredFile in @($showcaseTemplate, $storageScript, $gatewayScript)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Required demo file not found: $requiredFile"
     }
@@ -136,6 +155,17 @@ $workspaceResourceId = Get-AzValue @(
     '--workspace-name', $workspaceName,
     '--query', 'id'
 )
+$commonSecurityLogResult = Invoke-DemoAzCli -Arguments @(
+    'rest',
+    '--method', 'get',
+    '--uri', "https://management.azure.com$workspaceResourceId/tables/CommonSecurityLog?api-version=2022-10-01",
+    '--query', 'properties.provisioningState',
+    '--output', 'tsv',
+    '--only-show-errors'
+) -AllowFailure
+if ($commonSecurityLogResult.ExitCode -ne 0 -or $commonSecurityLogResult.Output -ne 'Succeeded') {
+    throw "The built-in CommonSecurityLog table is not ready in '$workspaceName'. Enable Microsoft Sentinel on the workspace, wait for the table provisioning state to become Succeeded, and run .\deployment-scripts\setup-demo.ps1 again."
+}
 $dataCollectionEndpointResourceId = Get-AzValue @(
     'monitor', 'data-collection', 'endpoint', 'show',
     '--subscription', $SubscriptionId,
@@ -164,6 +194,14 @@ $pipelineExtensionPrincipalId = Get-AzValue @(
     '--name', $pipelineExtensionName,
     '--query', 'identity.principalId'
 )
+$allowedSourceCidr = Get-AzValue @(
+    'network', 'nsg', 'rule', 'show',
+    '--subscription', $SubscriptionId,
+    '--resource-group', $ResourceGroupName,
+    '--nsg-name', $networkSecurityGroupName,
+    '--name', 'Allow-Syslog-Demo-Source',
+    '--query', 'sourceAddressPrefix'
+)
 
 Get-AzValue @(
     'resource', 'show',
@@ -191,20 +229,6 @@ $storageOutput = Invoke-DemoVmShellScript `
     -ScriptArguments @($pipelineNamespace, $persistentVolumeName, $PersistentVolumeCapacity)
 Write-Host $storageOutput
 
-Set-LogAnalyticsTable -WorkspaceResourceId $workspaceResourceId -TableName 'RawSyslog_CL' -Columns @(
-    @{ name = 'TimeGenerated'; type = 'datetime' }
-    @{ name = 'CollectorHostName'; type = 'string' }
-    @{ name = 'Computer'; type = 'string' }
-    @{ name = 'EventTime'; type = 'datetime' }
-    @{ name = 'Facility'; type = 'string' }
-    @{ name = 'HostIP'; type = 'string' }
-    @{ name = 'HostName'; type = 'string' }
-    @{ name = 'ProcessID'; type = 'int' }
-    @{ name = 'ProcessName'; type = 'string' }
-    @{ name = 'SeverityLevel'; type = 'string' }
-    @{ name = 'SourceSystem'; type = 'string' }
-    @{ name = 'SyslogMessage'; type = 'string' }
-)
 Set-LogAnalyticsTable -WorkspaceResourceId $workspaceResourceId -TableName 'OTelLogs_CL' -Columns @(
     @{ name = 'TimeGenerated'; type = 'datetime' }
     @{ name = 'Body'; type = 'string' }
@@ -241,12 +265,23 @@ Invoke-DemoAzCli -Arguments @(
     "dataCollectionEndpointResourceId=$dataCollectionEndpointResourceId",
     "dataCollectionEndpointLogsIngestionUrl=$dataCollectionEndpointLogsIngestionUrl",
     "pipelineExtensionPrincipalId=$pipelineExtensionPrincipalId",
+    "networkSecurityGroupName=$networkSecurityGroupName",
+    "allowedSourceCidr=$allowedSourceCidr",
     "persistentVolumeName=$persistentVolumeName",
     "maxStorageUsage=$MaxStorageUsageGiB",
     "retentionPeriod=$RetentionPeriodMinutes",
     '--output', 'none',
     '--only-show-errors'
 ) | Out-Null
+
+Write-Host 'Configuring the gateway with the CEF TCP/515 route...'
+$gatewayOutput = Invoke-DemoVmShellScript `
+    -SubscriptionId $SubscriptionId `
+    -ResourceGroupName $ResourceGroupName `
+    -VmName $vmName `
+    -ScriptPath $gatewayScript `
+    -ScriptArguments @($pipelineNamespace, $pipelineName, $traefikChartVersion, 'true')
+Write-Host $gatewayOutput
 
 $endpoint = Get-AzValue @(
     'network', 'public-ip', 'show',
@@ -259,5 +294,14 @@ $endpoint = Get-AzValue @(
 Write-Host ''
 Write-Host 'Full showcase configuration deployed.'
 Write-Host 'The pipeline controller may need several minutes to reconcile the update.'
-Write-Host "Run readiness: & .\test-demo-readiness.ps1 -SubscriptionId '$SubscriptionId' -ResourceGroupName '$ResourceGroupName' -NamePrefix '$NamePrefix'"
-Write-Host "Start traffic:  & .\run-demo.ps1 -Endpoint '$endpoint' -RunId 'DEMO-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))'"
+Write-Host "CEF endpoint: ${endpoint}:515"
+if ($PSBoundParameters.ContainsKey('ConfigFile')) {
+    Write-Host "Run readiness: & .\validation-scripts\test-demo-readiness.ps1 -ConfigFile '$($configState.Path)'"
+    Write-Host "Start traffic:  & .\generator-scripts\run-demo.ps1 -ConfigFile '$($configState.Path)' -DurationMinutes 2 -EventsPerSecond 5 -RunId 'DEMO-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))'"
+    Write-Host "Send CEF:       & .\generator-scripts\send-cef-demo.ps1 -ConfigFile '$($configState.Path)'"
+}
+else {
+    Write-Host 'Run readiness: & .\validation-scripts\test-demo-readiness.ps1'
+    Write-Host "Start traffic:  & .\generator-scripts\run-demo.ps1 -DurationMinutes 2 -EventsPerSecond 5 -RunId 'DEMO-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))'"
+    Write-Host 'Send CEF:       & .\generator-scripts\send-cef-demo.ps1'
+}

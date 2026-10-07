@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "Usage: $0 <pipeline-namespace> <pipeline-name> <persistent-volume-name>" >&2
+if [[ $# -lt 3 || $# -gt 4 ]]; then
+  echo "Usage: check-demo-cluster.sh <pipeline-namespace> <pipeline-name> <persistent-volume-name> [Syslog|OTLP|CEF|Both|All]" >&2
   exit 2
 fi
 
 pipeline_namespace="$1"
 pipeline_name="$2"
 persistent_volume_name="$3"
+protocol="${4:-Both}"
 state_file="/var/lib/azure-monitor-pipeline-demo/blocked-dce-routes"
 host_path="/var/lib/azure-monitor-pipeline-demo/buffer"
 pipeline_service="${pipeline_name}-service"
@@ -49,8 +50,23 @@ ready_addresses="$(kubectl get endpoints "$pipeline_service" -n "$pipeline_names
 echo "servicePorts=${service_ports}"
 echo "readyAddresses=${ready_addresses}"
 
-if [[ " $service_ports " != *" 514 "* || " $service_ports " != *" 4317 "* ]]; then
-  echo "Pipeline service does not expose both required receiver ports." >&2
+if [[ "$protocol" != "Syslog" && "$protocol" != "OTLP" && "$protocol" != "CEF" && "$protocol" != "Both" && "$protocol" != "All" ]]; then
+  echo "Unsupported protocol '$protocol'. Expected Syslog, OTLP, CEF, Both, or All." >&2
+  exit 2
+fi
+if [[ "$protocol" == "Syslog" || "$protocol" == "Both" || "$protocol" == "All" ]] && \
+  [[ " $service_ports " != *" 514 "* ]]; then
+  echo "Pipeline service does not expose required Syslog port 514." >&2
+  exit 1
+fi
+if [[ "$protocol" == "OTLP" || "$protocol" == "Both" || "$protocol" == "All" ]] && \
+  [[ " $service_ports " != *" 4317 "* ]]; then
+  echo "Pipeline service does not expose required OTLP port 4317." >&2
+  exit 1
+fi
+if [[ "$protocol" == "CEF" || "$protocol" == "All" ]] && \
+  [[ " $service_ports " != *" 515 "* ]]; then
+  echo "Pipeline service does not expose required CEF port 515." >&2
   exit 1
 fi
 if [[ -z "$ready_addresses" ]]; then

@@ -1,3 +1,4 @@
+# Shared Azure CLI and VM Run Command helpers.
 function Invoke-DemoAzCli {
     param(
         [Parameter(Mandatory)]

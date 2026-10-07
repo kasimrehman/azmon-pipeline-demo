@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 6 ]]; then
-  echo "Usage: $0 <subscription-id> <resource-group> <cluster-name> <location> <k3s-version> <custom-locations-oid>" >&2
+  echo "Usage: bootstrap-k3s.sh <subscription-id> <resource-group> <cluster-name> <location> <k3s-version> <custom-locations-oid>" >&2
   exit 2
 fi
 

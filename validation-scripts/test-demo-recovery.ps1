@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
+    [Parameter()]
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
     [string] $SubscriptionId,
 
@@ -21,8 +21,15 @@ param(
     [int] $EventsPerSecond = 2,
 
     [Parameter()]
+    [ValidateSet('Syslog', 'OTLP', 'Both')]
+    [string] $Protocol = 'Both',
+
+    [Parameter()]
     [ValidateRange(1, 30)]
-    [int] $MaxIngestionWaitMinutes = 15
+    [int] $MaxIngestionWaitMinutes = 15,
+
+    [Parameter()]
+    [string] $ConfigFile
 )
 
 Set-StrictMode -Version Latest
@@ -32,10 +39,25 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-. (Join-Path $PSScriptRoot 'demo\demo-common.ps1')
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $repositoryRoot 'script-modules\demo-common.ps1')
+. (Join-Path $repositoryRoot 'script-modules\demo-config.ps1')
 
-$runDemoScript = Join-Path $PSScriptRoot 'run-demo.ps1'
-$outageScript = Join-Path $PSScriptRoot 'set-demo-outage.ps1'
+$configState = Get-DemoConfiguration `
+    -Path $ConfigFile `
+    -DefaultDirectory $repositoryRoot `
+    -ExplicitPath:($PSBoundParameters.ContainsKey('ConfigFile'))
+$SubscriptionId = Resolve-DemoConfigurationValue -Name 'SubscriptionId' -BoundParameters $PSBoundParameters -CurrentValue $SubscriptionId -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+$ResourceGroupName = Resolve-DemoConfigurationValue -Name 'ResourceGroupName' -BoundParameters $PSBoundParameters -CurrentValue $ResourceGroupName -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+$NamePrefix = Resolve-DemoConfigurationValue -Name 'NamePrefix' -BoundParameters $PSBoundParameters -CurrentValue $NamePrefix -Configuration $configState.Values -ConfigurationPath $configState.Path -Required
+Assert-DemoConfigurationValue -Name 'SubscriptionId' -Value $SubscriptionId
+Assert-DemoConfigurationValue -Name 'ResourceGroupName' -Value $ResourceGroupName
+Assert-DemoConfigurationValue -Name 'NamePrefix' -Value $NamePrefix
+
+$runDemoScript = Join-Path $repositoryRoot 'generator-scripts\run-demo.ps1'
+$outageScript = Join-Path $repositoryRoot 'operations-scripts\set-demo-outage.ps1'
+$syslogEnabled = $Protocol -in @('Syslog', 'Both')
+$otlpEnabled = $Protocol -in @('OTLP', 'Both')
 $runId = 'RECOVERY-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $senderJob = $null
 $blockAttempted = $false
@@ -135,18 +157,20 @@ $workspaceCustomerId = (Invoke-DemoAzCli -Arguments @(
 $durationSeconds = 15 + $OutageSeconds + 300
 $durationMinutes = $durationSeconds / 60.0
 Write-Host "Recovery run ID: $runId"
+Write-Host "Protocol: $Protocol"
 Write-Host "Traffic will continue until 30 seconds after the $OutageSeconds-second DCE-path interruption is restored."
 
 try {
     $senderJob = Start-Job -ScriptBlock {
-        param($ScriptPath, $Endpoint, $DurationMinutes, $EventsPerSecond, $RunId, $StopFilePath)
+        param($ScriptPath, $Endpoint, $DurationMinutes, $EventsPerSecond, $RunId, $StopFilePath, $Protocol)
         & $ScriptPath `
             -Endpoint $Endpoint `
             -DurationMinutes $DurationMinutes `
             -EventsPerSecond $EventsPerSecond `
             -RunId $RunId `
-            -StopFilePath $StopFilePath
-    } -ArgumentList $runDemoScript, $endpoint, $durationMinutes, $EventsPerSecond, $runId, $stopFilePath
+            -StopFilePath $StopFilePath `
+            -Protocol $Protocol
+    } -ArgumentList $runDemoScript, $endpoint, $durationMinutes, $EventsPerSecond, $runId, $stopFilePath, $Protocol
 
     Wait-SenderSequence -Job $senderJob -MinimumSequence ($EventsPerSecond * 10) -TimeoutSeconds 90
 
@@ -188,9 +212,17 @@ try {
         throw 'The telemetry sender did not return its final event counts.'
     }
     $completion = $completionLine | ConvertFrom-Json
-    $expectedSentCount = [int]$completion.counts.syslog
-    if ($expectedSentCount -le 0 -or [int]$completion.counts.otlp -ne $expectedSentCount) {
-        throw "The telemetry sender reported inconsistent final counts: Syslog=$($completion.counts.syslog), OTLP=$($completion.counts.otlp)."
+    $syslogSentCount = [int]$completion.counts.syslog
+    $otlpSentCount = [int]$completion.counts.otlp
+    $expectedSentCount = if ($syslogEnabled) { $syslogSentCount } else { $otlpSentCount }
+    if (
+        $expectedSentCount -le 0 -or
+        ($syslogEnabled -and $syslogSentCount -ne $expectedSentCount) -or
+        ($otlpEnabled -and $otlpSentCount -ne $expectedSentCount) -or
+        (-not $syslogEnabled -and $syslogSentCount -ne 0) -or
+        (-not $otlpEnabled -and $otlpSentCount -ne 0)
+    ) {
+        throw "The telemetry sender reported invalid $Protocol counts: Syslog=$syslogSentCount, OTLP=$otlpSentCount."
     }
     $retainedPatternIndexes = @(2, 4, 6, 8, 9)
     $expectedRetainedCount = @(0..($expectedSentCount - 1) | Where-Object {
@@ -222,44 +254,62 @@ $deadline = [DateTime]::UtcNow.AddMinutes($MaxIngestionWaitMinutes)
 $recoveryPassed = $false
 
 do {
-    $syslogRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'RawSyslog_CL' -Query @"
+    $syslogRows = if ($syslogEnabled) { @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'Syslog' -Query @"
 let BlockedAt=datetime($blockedLiteral);
 let RestoredAt=datetime($restoredLiteral);
-RawSyslog_CL
+Syslog
 | where TimeGenerated > ago(30m) and SyslogMessage contains '$escapedRunId'
 | summarize Count=count(), Before=countif(TimeGenerated < BlockedAt), During=countif(TimeGenerated between (BlockedAt .. RestoredAt)), After=countif(TimeGenerated > RestoredAt), Leaks=countif(SyslogMessage contains 'demo.user@example.com' or SyslogMessage contains 'demo-token-123'), Health=countif(SyslogMessage contains 'event_class=health'), Redacted=countif(SyslogMessage contains '[REDACTED_')
-"@)
-    $otlpRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'OTelLogs_CL' -Query @"
+"@) } else { @() }
+    $otlpRows = if ($otlpEnabled) { @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'OTelLogs_CL' -Query @"
 let BlockedAt=datetime($blockedLiteral);
 let RestoredAt=datetime($restoredLiteral);
 OTelLogs_CL
 | where TimeGenerated > ago(30m) and DemoRunId == '$escapedRunId'
 | summarize Count=count(), Before=countif(TimeGenerated < BlockedAt), During=countif(TimeGenerated between (BlockedAt .. RestoredAt)), After=countif(TimeGenerated > RestoredAt), DistinctSequences=dcount(SequenceNumber), Leaks=countif(Body contains 'demo.user@example.com' or Body contains 'demo-token-123'), Health=countif(EventClass == 'health'), Redacted=countif(Body contains '[REDACTED_')
-"@)
-    $summaryRows = @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'EdgeLogSummary_CL' -Query @"
+"@) } else { @() }
+    $summaryRows = if ($syslogEnabled) { @(Get-QueryRows -WorkspaceCustomerId $workspaceCustomerId -QueryName 'EdgeLogSummary_CL' -Query @"
 EdgeLogSummary_CL
 | where TimeGenerated > ago(30m) and DemoRunId == '$escapedRunId'
 | summarize Rows=count(), Events=sum(EventCount)
-"@)
+"@) } else { @() }
 
-    if ($syslogRows.Count -gt 0 -and $otlpRows.Count -gt 0 -and $summaryRows.Count -gt 0) {
-        $syslog = $syslogRows[0]
-        $otlp = $otlpRows[0]
-        $summary = $summaryRows[0]
-        $recoveryPassed = (
-            [long]$syslog.Before -gt 0 -and [long]$syslog.After -gt 0 -and
-            [long]$syslog.Leaks -eq 0 -and [long]$syslog.Health -eq 0 -and
-            [long]$otlp.Before -gt 0 -and [long]$otlp.During -gt 0 -and [long]$otlp.After -gt 0 -and
-            [long]$otlp.Count -eq $expectedRetainedCount -and [long]$otlp.DistinctSequences -eq $expectedRetainedCount -and
-            [long]$otlp.Leaks -eq 0 -and [long]$otlp.Health -eq 0 -and [long]$otlp.Redacted -eq $expectedRetainedCount -and
-            [long]$summary.Rows -gt 0 -and [long]$summary.Events -eq $expectedSentCount
-        )
+    $requiredRowsPresent = (
+        (-not $syslogEnabled -or ($syslogRows.Count -gt 0 -and $summaryRows.Count -gt 0)) -and
+        (-not $otlpEnabled -or $otlpRows.Count -gt 0)
+    )
+    if ($requiredRowsPresent) {
+        $syslogPassed = $true
+        $otlpPassed = $true
+        $observations = @()
+        if ($syslogEnabled) {
+            $syslog = $syslogRows[0]
+            $summary = $summaryRows[0]
+            $syslogPassed = (
+                [long]$syslog.Before -gt 0 -and [long]$syslog.After -gt 0 -and
+                [long]$syslog.Leaks -eq 0 -and [long]$syslog.Health -eq 0 -and
+                [long]$summary.Rows -gt 0 -and [long]$summary.Events -eq $expectedSentCount
+            )
+            $observations += "Raw before/during/after=$($syslog.Before)/$($syslog.During)/$($syslog.After)"
+            $observations += "Summary events=$($summary.Events)/$expectedSentCount"
+        }
+        if ($otlpEnabled) {
+            $otlp = $otlpRows[0]
+            $otlpPassed = (
+                [long]$otlp.Before -gt 0 -and [long]$otlp.During -gt 0 -and [long]$otlp.After -gt 0 -and
+                [long]$otlp.Count -eq $expectedRetainedCount -and [long]$otlp.DistinctSequences -eq $expectedRetainedCount -and
+                [long]$otlp.Leaks -eq 0 -and [long]$otlp.Health -eq 0 -and
+                [long]$otlp.Redacted -eq $expectedRetainedCount
+            )
+            $observations += "OTLP before/during/after=$($otlp.Before)/$($otlp.During)/$($otlp.After), distinct=$($otlp.DistinctSequences)/$expectedRetainedCount"
+        }
+        $recoveryPassed = $syslogPassed -and $otlpPassed
         if ($recoveryPassed) {
-            Write-Host "[PASS] Persistent recovery: OTLP retained all $expectedRetainedCount filtered records across the outage, the summary retained all $expectedSentCount source events, and raw Syslog resumed after restoration for $runId."
+            Write-Host "[PASS] $Protocol recovery completed for $runId. $($observations -join '; ')."
             break
         }
 
-        Write-Host "Observed recovery: Raw before/during/after=$($syslog.Before)/$($syslog.During)/$($syslog.After); OTLP before/during/after=$($otlp.Before)/$($otlp.During)/$($otlp.After), distinct=$($otlp.DistinctSequences)/$expectedRetainedCount; Summary events=$($summary.Events)/$expectedSentCount."
+        Write-Host "Observed recovery: $($observations -join '; ')."
     }
 
     Write-Host 'Waiting for buffered records to drain into Log Analytics...'
@@ -267,5 +317,5 @@ EdgeLogSummary_CL
 } while ([DateTime]::UtcNow -lt $deadline)
 
 if (-not $recoveryPassed) {
-    throw "Recovery run $runId did not prove persistent OTLP and summary recovery plus raw Syslog resumption within $MaxIngestionWaitMinutes minute(s)."
+    throw "Recovery run $runId did not prove the expected $Protocol recovery behavior within $MaxIngestionWaitMinutes minute(s)."
 }

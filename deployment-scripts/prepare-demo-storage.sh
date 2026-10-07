@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
-  echo "Usage: $0 <pipeline-namespace> <persistent-volume-name> <capacity>" >&2
+  echo "Usage: prepare-demo-storage.sh <pipeline-namespace> <persistent-volume-name> <capacity>" >&2
   exit 2
 fi
 

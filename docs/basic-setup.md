@@ -1,6 +1,6 @@
 # Standalone Arc-enabled Azure Monitor pipeline demo
 
-This package deploys an isolated Ubuntu 22.04 VM running K3s `v1.33.3+k3s1`, connects it to Azure Arc, installs an Azure Monitor pipeline, and exposes source-restricted Syslog TCP/514 and OTLP gRPC/4317 demo endpoints. The Syslog pipeline scenario is generally available; OTLP log collection remains in preview.
+This package deploys an isolated Ubuntu 22.04 VM running K3s `v1.33.3+k3s1`, connects it to Azure Arc, installs an Azure Monitor pipeline, and exposes source-restricted Syslog TCP/514 and OTLP gRPC/4317 base endpoints. The additive showcase also exposes CEF over Syslog/TCP on port 515 after Microsoft Sentinel provisions `CommonSecurityLog`. The Syslog pipeline scenario is generally available; OTLP log collection remains in preview.
 
 It does not depend on the rest of ArcBox. SSH and the Kubernetes API are not exposed publicly; cluster bootstrap uses Azure VM Run Command. Clients send raw Syslog TCP or OTLP gRPC to Traefik. Traefik then uses a managed client certificate and mTLS for the separate in-cluster connection to the pipeline.
 
@@ -10,11 +10,12 @@ It does not depend on the rest of ArcBox. SSH and the Kubernetes API are not exp
 - K3s `v1.33.3+k3s1`, connected to Azure Arc with cluster-connect and custom-locations enabled.
 - The `microsoft.certmanagement` and `microsoft.monitor.pipelinecontroller` Arc extensions.
 - A custom location, Log Analytics workspace, data collection endpoint, data collection rule, `OTelLogs_CL` table, and Azure Monitor pipeline group.
-- A Traefik TCP gateway for Syslog TCP/514 and OTLP gRPC/4317.
+- A Traefik TCP gateway for Syslog TCP/514 and OTLP gRPC/4317, extended with
+  CEF TCP/515 by `setup-demo.ps1`.
 
-Only the supplied `AllowedSourceCidr` can reach ports 514 and 4317. The NSG does not expose SSH or the Kubernetes API. The deployment temporarily grants the VM identity the Arc onboarding role and removes that assignment after bootstrap.
+Only the supplied `AllowedSourceCidr` can reach ports 514, 515, and 4317. The NSG does not expose SSH or the Kubernetes API. The deployment temporarily grants the VM identity the Arc onboarding role and removes that assignment after bootstrap.
 
-For component relationships, deployment sequencing, identity and certificate trust, and end-to-end telemetry flows, see the [detailed architecture](architecture.md). Use [demo setup and operations](demo-setup.md) to install and verify the showcase, then follow the [12-minute demo guide](../README.md) during the presentation.
+For component relationships, deployment sequencing, identity and certificate trust, and end-to-end telemetry flows, see the [detailed architecture](architecture.md). Use [demo setup and operations](demo-setup.md) to install and verify the showcase, then select the [Syslog, CEF, or OTLP experiment](../README.md) for the presentation.
 
 ## Prerequisites
 
@@ -29,24 +30,28 @@ The Syslog pipeline scenario is generally available, while the OTLP receiver and
 
 ## Deploy
 
-Copy [deploy.example.ps1](../deploy.example.ps1) to the ignored `deploy.local.ps1`, replace its example subscription, fresh resource group name, and source CIDR values, then edit it:
+Copy [deploy.example.ps1](../deployment-scripts/deploy.example.ps1) to the
+ignored `deployment-scripts\deploy.local.ps1`, replace its example
+subscription, fresh resource group name, and source CIDR values, then edit it:
 
 ```powershell
-Copy-Item .\deploy.example.ps1 .\deploy.local.ps1
-code .\deploy.local.ps1
+Copy-Item `
+    .\deployment-scripts\deploy.example.ps1 `
+    .\deployment-scripts\deploy.local.ps1
+code .\deployment-scripts\deploy.local.ps1
 ```
 
 Then run phase 1:
 
 ```powershell
-.\deploy.local.ps1
+.\deployment-scripts\deploy.local.ps1
 ```
 
 Alternatively, invoke phase 1 directly from this directory:
 
 ```powershell
 
-& .\deploy.ps1 `
+& .\deployment-scripts\deploy.ps1 `
     -SubscriptionId '<subscription-id>' `
     -ResourceGroupName 'rg-arc-monitor-demo' `
     -Location 'eastus2' `
@@ -63,13 +68,33 @@ The Cidr is needed for you to be able to send monitoring data to the public endp
 
 Phase 1 commonly takes 20-40 minutes. It removes the temporary `Kubernetes Cluster - Azure Arc Onboarding` role assignment in a `finally` block, including failed bootstrap paths. At the end, it starts the `<prefix>-monitoring` resource-group deployment and returns without waiting for the long-running pipeline resource deployment.
 
+After the infrastructure deployment succeeds, `deploy.ps1` writes `demo.config.psd1` in the repository root. This ignored, non-secret local file contains the values needed by subsequent commands:
+
+```powershell
+@{
+    SubscriptionId   = '00000000-0000-0000-0000-000000000000'
+    ResourceGroupName = 'rg-arc-monitor-demo'
+    NamePrefix        = 'arcmon'
+    Endpoint          = '203.0.113.10'
+}
+```
+
+For an existing deployment, retrieve the endpoint IP using the subscription, resource group, and prefix in the configuration file:
+
+```powershell
+.\deployment-scripts\get-demo-endpoint.ps1
+```
+
+For a configuration stored elsewhere, run
+`.\deployment-scripts\get-demo-endpoint.ps1 -ConfigFile 'C:\demo\my-demo.config.psd1'`.
+Use the returned value for `Endpoint`.
+
+See [demo.config.example.psd1](../demo.config.example.psd1) for the tracked example. To use a different location, pass `-ConfigFile '<path>'` to `deploy.ps1` and to subsequent commands. If the file was not generated for an existing environment, copy the example to `demo.config.psd1` and enter the existing deployment values. Explicit command-line parameters override file values.
+
 In Azure Portal, open the resource group, select **Deployments**, and wait for `<prefix>-monitoring` to show **Succeeded**. Then run phase 2:
 
 ```powershell
-& .\complete-deployment.ps1 `
-    -SubscriptionId '<subscription-id>' `
-    -ResourceGroupName 'rg-arc-monitor-demo' `
-    -NamePrefix 'arcmon'
+& .\deployment-scripts\complete-deployment.ps1
 ```
 
 Phase 2 does not poll Azure. It verifies that the monitoring deployment already succeeded, configures the mTLS Traefik gateway, and prints the Syslog and OTLP endpoints. It is safe to run again if gateway configuration needs to be retried.
@@ -94,10 +119,7 @@ The certificate-management extension can create the Azure Monitor root CA Secret
 Run validation after phase 2:
 
 ```powershell
-& .\validate.ps1 `
-    -SubscriptionId '<subscription-id>' `
-    -ResourceGroupName 'rg-arc-monitor-demo' `
-    -NamePrefix 'arcmon'
+& .\validation-scripts\validate.ps1
 ```
 
 The validation checks both ARM deployments, the workspace, Arc connectivity, the full pinned K3s version, both extensions, the custom location, DCR, pipeline group, custom table, and TCP reachability from the current machine.
@@ -107,15 +129,8 @@ The validation checks both ARM deployments, the workspace, Arc connectivity, the
 The base deployment is intentionally small. Add continuous traffic, filtering, redaction, aggregation, persistent buffering, and full readiness checks without changing the base scripts:
 
 ```powershell
-& .\setup-demo.ps1 `
-    -SubscriptionId '<subscription-id>' `
-    -ResourceGroupName 'rg-arc-monitor-demo' `
-    -NamePrefix 'arcmon'
-
-& .\test-demo-readiness.ps1 `
-    -SubscriptionId '<subscription-id>' `
-    -ResourceGroupName 'rg-arc-monitor-demo' `
-    -NamePrefix 'arcmon'
+& .\deployment-scripts\setup-demo.ps1
+& .\validation-scripts\test-demo-readiness.ps1
 ```
 
 The readiness check sends a short run and waits for filtered, redacted, and aggregated records. See [demo setup and operations](demo-setup.md) for the persistent-storage limitation and rehearsed outage controls.
@@ -124,22 +139,17 @@ Before presenting the resilience segment, run `test-demo-recovery.ps1` as docume
 
 ## Send demo logs
 
-Use the endpoint printed by `complete-deployment.ps1` or `validate.ps1`:
+Use the endpoint stored in `demo.config.psd1`:
 
 ```powershell
-& .\send-syslog-demo.ps1 -Endpoint '<public-ip>'
-& .\send-otlp-demo.ps1 -Endpoint '<public-ip>'
+& .\generator-scripts\send-syslog-demo.ps1
+& .\generator-scripts\send-otlp-demo.ps1
 ```
 
-You can retrieve the public IP from Azure at any time:
+You can retrieve the public IP from Azure at any time using the local configuration:
 
 ```powershell
-az network public-ip show `
-    --subscription '<subscription-id>' `
-    --resource-group 'rg-arc-monitor-demo' `
-    --name 'arcmon-pip' `
-    --query ipAddress `
-    --output tsv
+.\deployment-scripts\get-demo-endpoint.ps1
 ```
 
 Each command prints a unique marker. Allow several minutes for ingestion, then query the deployed Log Analytics workspace.
@@ -174,9 +184,7 @@ This is a demonstration, not a production reference architecture. The OTLP path 
 Cleanup deletes the entire standalone resource group and prompts for confirmation:
 
 ```powershell
-& .\cleanup.ps1 `
-    -SubscriptionId '<subscription-id>' `
-    -ResourceGroupName 'rg-arc-monitor-demo'
+& .\deployment-scripts\cleanup.ps1
 ```
 
 For unattended cleanup, add `-Force`. The script refuses to delete a resource group that does not have the standalone demo workload tag.

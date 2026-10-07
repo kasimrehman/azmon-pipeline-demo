@@ -6,7 +6,7 @@ param namePrefix string = 'arcmon'
 @description('Azure region for the demo resources.')
 param location string = resourceGroup().location
 
-@description('CIDR allowed to send Syslog and OTLP traffic, for example 203.0.113.10/32.')
+@description('CIDR allowed to send Syslog, CEF, and OTLP traffic, for example 203.0.113.10/32.')
 param allowedSourceCidr string
 
 @description('SSH public key used for the VM administrator account. Port 22 is not opened by this template.')
@@ -62,6 +62,19 @@ resource networkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2024-05-0
           protocol: 'Tcp'
           sourcePortRange: '*'
           destinationPortRange: '4317'
+          sourceAddressPrefix: allowedSourceCidr
+          destinationAddressPrefix: '*'
+        }
+      }
+      {
+        name: 'Allow-CEF-Demo-Source'
+        properties: {
+          priority: 120
+          access: 'Allow'
+          direction: 'Inbound'
+          protocol: 'Tcp'
+          sourcePortRange: '*'
+          destinationPortRange: '515'
           sourceAddressPrefix: allowedSourceCidr
           destinationAddressPrefix: '*'
         }

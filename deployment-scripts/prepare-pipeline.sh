@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "Usage: $0 <pipeline-namespace>" >&2
+  echo "Usage: prepare-pipeline.sh <pipeline-namespace>" >&2
   exit 2
 fi
 
@@ -31,27 +31,22 @@ done
 
 for base in arc-amp-root-ca arc-amp-client-root-ca; do
   current="${base}-current"
-  if ! kubectl get secret "$current" -n cert-manager >/dev/null 2>&1; then
-    kubectl get secret "$base" -n cert-manager -o json | jq \
-      --arg base "$base" \
-      --arg current "$current" \
-      '{
-        apiVersion: "v1",
-        kind: "Secret",
-        metadata: {
-          name: $current,
-          namespace: "cert-manager",
-          labels: {
-            "microsoft-certmanagement.clusterextensions.azure.com/ac-rotation-active": $base
-          }
-        },
-        type: .type,
-        data: .data
-      }' | kubectl apply -f - >/dev/null
-  fi
-  kubectl label secret "$current" -n cert-manager \
-    "microsoft-certmanagement.clusterextensions.azure.com/ac-rotation-active=${base}" \
-    --overwrite >/dev/null
+  kubectl get secret "$base" -n cert-manager -o json | jq \
+    --arg base "$base" \
+    --arg current "$current" \
+    '{
+      apiVersion: "v1",
+      kind: "Secret",
+      metadata: {
+        name: $current,
+        namespace: "cert-manager",
+        labels: {
+          "microsoft-certmanagement.clusterextensions.azure.com/ac-rotation-active": $base
+        }
+      },
+      type: .type,
+      data: .data
+    }' | kubectl apply -f - >/dev/null
 done
 
 kubectl wait --for=condition=Ready \

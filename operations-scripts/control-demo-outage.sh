@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-  echo "Usage: $0 <block|restore|status> <dce-hostname>" >&2
+  echo "Usage: control-demo-outage.sh <block|restore|status> <dce-hostname>" >&2
   exit 2
 fi
 
